@@ -23,7 +23,7 @@ class IndexingError(AgentError):
     """Raised when repository indexing fails."""
 
 
-class MemoryError(AgentError):
+class AgentMemoryError(AgentError):
     """Raised when memory storage or retrieval fails."""
 
 

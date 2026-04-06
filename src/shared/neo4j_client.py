@@ -68,9 +68,13 @@ class Neo4jClient:
         parameters: dict[str, Any] | None = None,
         database: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Run a write query inside an implicit transaction."""
+        """Run a write query inside a managed write transaction (with retries)."""
         db = database or self._settings.NEO4J_DATABASE
+        params = parameters or {}
+
+        async def _work(tx: Any) -> list[dict[str, Any]]:
+            result = await tx.run(query, params)
+            return await result.data()
+
         async with self.driver.session(database=db) as session:
-            result = await session.run(query, parameters or {})
-            records = await result.data()
-            return records
+            return await session.execute_write(_work)
