@@ -12,6 +12,9 @@ from src.shared.logging import setup_logging, get_logger
 from src.shared.settings import Settings
 from src.gateway.middleware import CorrelationIdMiddleware
 from src.gateway.routes.health import router as health_router
+from src.gateway.routes.chat import router as chat_router
+from src.gateway.routes.index import router as index_router
+from src.gateway.routes.graph import router as graph_router
 
 settings = Settings()
 
@@ -44,3 +47,6 @@ app.add_middleware(CorrelationIdMiddleware)
 
 # Routers
 app.include_router(health_router)
+app.include_router(chat_router)
+app.include_router(index_router)
+app.include_router(graph_router)
