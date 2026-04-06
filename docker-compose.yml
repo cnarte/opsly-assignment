@@ -28,6 +28,109 @@ services:
       timeout: 3s
       retries: 5
 
+  gateway:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.gateway
+    ports:
+      - "8000:8000"
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    env_file: .env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/agents/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.orchestrator
+    ports:
+      - "8010:8010"
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  indexer:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.indexer
+    ports:
+      - "8011:8011"
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    env_file: .env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8011/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  graph-query:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.graph-query
+    ports:
+      - "8012:8012"
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    env_file: .env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8012/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  code-analyst:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.code-analyst
+    ports:
+      - "8013:8013"
+    env_file: .env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8013/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  memory:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.memory
+    ports:
+      - "8014:8014"
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8014/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
 volumes:
   neo4j_data:
   redis_data:

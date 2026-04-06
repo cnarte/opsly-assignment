@@ -1,0 +1,12 @@
+FROM python:3.13-slim AS base
+
+WORKDIR /app
+
+COPY pyproject.toml .
+RUN pip install --no-cache-dir .
+
+COPY src/ src/
+
+EXPOSE 8014
+
+CMD ["python", "-m", "src.memory.server"]

@@ -1,0 +1,15 @@
+FROM python:3.13-slim AS base
+
+WORKDIR /app
+
+COPY pyproject.toml .
+RUN pip install --no-cache-dir .
+
+COPY src/ src/
+
+# Git is required for cloning repositories
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+
+EXPOSE 8011
+
+CMD ["python", "-m", "src.indexer.server"]
