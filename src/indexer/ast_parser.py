@@ -71,10 +71,27 @@ class _ExtractionContext:
         self.all_exports: list[str] | None = None
         # Track occurrence counts per (scope, kind, name) for index assignment
         self._occurrence: dict[tuple[str, str, str], int] = {}
+        # Derive module base from file_path for scope chain root
+        self._module_base = self._path_to_module(file_path)
+
+    @staticmethod
+    def _path_to_module(file_path: str) -> str:
+        """Convert a file path like 'fastapi/routing.py' to 'fastapi.routing'."""
+        if not file_path:
+            return "<module>"
+        # Strip .py extension and convert / to .
+        p = file_path.replace("\\", "/")
+        if p.endswith(".py"):
+            p = p[:-3]
+        if p.endswith("/__init__"):
+            p = p[:-9]
+        return p.replace("/", ".") if p else "<module>"
 
     @property
     def scope_chain(self) -> str:
-        return ".".join(self.scope_stack) if self.scope_stack else "<module>"
+        if self.scope_stack:
+            return f"{self._module_base}.{'.'.join(self.scope_stack)}"
+        return self._module_base
 
     def next_index(self, kind: str, name: str) -> int:
         key = (self.scope_chain, kind, name)

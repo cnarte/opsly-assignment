@@ -231,8 +231,15 @@ class TestModuleLevel:
 
 class TestSymbolId:
     def test_build_symbol_id_format(self) -> None:
-        sid = ASTParser.build_symbol_id("repo", "class", "<module>", "Foo", 0)
-        assert sid == "repo:class:<module>:Foo:0"
+        sid = ASTParser.build_symbol_id("repo", "class", "mypackage.mymod", "Foo", 0)
+        assert sid == "repo:class:mypackage.mymod:Foo:0"
+
+    def test_scope_chain_uses_module_path(self, parser: ASTParser) -> None:
+        src = "class TopLevel:\n    pass\n"
+        result = parser.parse(src, "fastapi/routing.py")
+        cls = result["classes"][0]
+        assert cls["scope_chain"] == "fastapi.routing"
+        assert "fastapi.routing" in cls["symbol_id"]
 
     def test_unique_ids_same_name_different_scope(self, parser: ASTParser) -> None:
         src = textwrap.dedent('''\
