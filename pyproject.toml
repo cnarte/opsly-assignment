@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fastapi-repo-chat-agent"
+version = "0.1.0"
+description = "FastAPI Repository Chat Agent - MCP Multi-Agent System"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.25,<2",
+    "langgraph~=1.1",
+    "langgraph-prebuilt",
+    "langchain-mcp-adapters",
+    "langchain-openrouter~=0.2",
+    "neo4j~=6.1",
+    "redis[hiredis]",
+    "graphiti-core",
+    "fastapi",
+    "uvicorn[standard]",
+    "libcst",
+    "pydantic-settings",
+    "httpx",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "httpx",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["."]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*"]
