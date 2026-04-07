@@ -58,7 +58,7 @@ services:
         condition: service_healthy
     env_file: .env
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/')"]
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8010),2); s.close()"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -75,7 +75,7 @@ services:
         condition: service_healthy
     env_file: .env
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8011/')"]
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8011),2); s.close()"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -92,7 +92,7 @@ services:
         condition: service_healthy
     env_file: .env
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8012/')"]
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8012),2); s.close()"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -106,7 +106,7 @@ services:
       - "8013:8013"
     env_file: .env
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8013/')"]
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8013),2); s.close()"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -125,7 +125,7 @@ services:
         condition: service_healthy
     env_file: .env
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8014/')"]
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8014),2); s.close()"]
       interval: 10s
       timeout: 5s
       retries: 3

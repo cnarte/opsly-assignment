@@ -65,10 +65,10 @@ Guidelines:
 
 # Maps query intent to the list of agents that should be invoked.
 AGENT_SELECTION_MAP: dict[str, list[str]] = {
-    "code_lookup": ["graph_query"],
-    "relationship_query": ["graph_query"],
-    "code_explanation": ["code_analyst", "graph_query"],
-    "pattern_analysis": ["code_analyst"],
-    "comparison": ["code_analyst", "graph_query"],
-    "general": ["code_analyst"],
+    "code_lookup": ["graph_query", "code_analyst"],
+    "relationship_query": ["graph_query", "code_analyst"],
+    "code_explanation": ["graph_query", "code_analyst"],
+    "pattern_analysis": ["graph_query", "code_analyst"],
+    "comparison": ["graph_query", "code_analyst"],
+    "general": ["graph_query", "code_analyst"],
 }

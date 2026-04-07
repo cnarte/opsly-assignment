@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     # LLM / OpenRouter
     OPENROUTER_API_KEY: str = ""
-    OPENROUTER_MODEL: str = "qwen/qwen3.6-plus:free"
+    OPENROUTER_MODEL: str = "nvidia/nemotron-3-super-120b-a12b:free"
 
     # Neo4j
     NEO4J_URI: str = "bolt://localhost:7687"

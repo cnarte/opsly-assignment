@@ -21,9 +21,13 @@ from src.shared.settings import Settings
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("orchestrator-agent")
-
 settings = Settings()
+
+mcp = FastMCP(
+    "orchestrator-agent",
+    host="0.0.0.0",
+    port=settings.ORCHESTRATOR_PORT,
+)
 
 # Compile the graph once at module level
 _graph = build_orchestrator_graph()
@@ -43,6 +47,7 @@ def _initial_state(message: str, session_id: str = "") -> dict[str, Any]:
         "agent_results": {},
         "conversation_context": [],
         "final_response": "",
+        "session_id": session_id,
     }
 
 
@@ -160,6 +165,4 @@ def _safe_serialise(obj: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import uvicorn
-
-    mcp.run(transport="streamable-http", port=settings.ORCHESTRATOR_PORT)
+    mcp.run(transport="streamable-http")

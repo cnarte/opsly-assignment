@@ -52,7 +52,12 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         logger.info("Memory agent backing stores closed")
 
 
-mcp = FastMCP("memory-agent", lifespan=_lifespan)
+mcp = FastMCP(
+    "memory-agent",
+    host="0.0.0.0",
+    port=settings.MEMORY_PORT,
+    lifespan=_lifespan,
+)
 
 # ---------------------------------------------------------------------------
 # Tools
@@ -165,11 +170,4 @@ async def get_user_preferences(session_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(
-        "src.memory.server:mcp.streamable_http_app()",
-        host="0.0.0.0",
-        port=settings.MEMORY_PORT,
-        factory=True,
-    )
+    mcp.run(transport="streamable-http")

@@ -35,15 +35,16 @@ async def run(
         scope = ent.get("scope", "<module>")
         name = ent.get("name", "")
 
-        # Build qualified name from file module path + scope + name
-        mod_path = fp.replace(os.sep, ".").removesuffix(".py") if fp else ""
-        if mod_path.endswith(".__init__"):
-            mod_path = mod_path.removesuffix(".__init__")
-
+        # scope_chain already includes the module path (set during AST walk),
+        # so just append the entity name. Fallback to mod_path if scope is
+        # missing for any reason.
         if scope and scope != "<module>":
-            qualified = f"{mod_path}.{scope}.{name}"
+            qualified = f"{scope}.{name}"
         else:
-            qualified = f"{mod_path}.{name}"
+            mod_path = fp.replace(os.sep, ".").removesuffix(".py") if fp else ""
+            if mod_path.endswith(".__init__"):
+                mod_path = mod_path.removesuffix(".__init__")
+            qualified = f"{mod_path}.{name}" if mod_path else name
 
         # Compute source hash from the relevant lines
         source_hash = ""

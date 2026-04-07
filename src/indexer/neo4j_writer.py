@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 from typing import Any
 
 from src.shared.neo4j_client import Neo4jClient
@@ -15,6 +16,32 @@ _SYMBOL_LABELS = [
     "File", "Module", "Class", "Function", "Method",
     "Parameter", "Decorator", "Import", "Docstring",
 ]
+
+
+# Keys that are internal to AST parsing and should not be stored in Neo4j
+_INTERNAL_KEYS = {"_raw_name"}
+
+
+def _sanitize_props(node: dict[str, Any]) -> dict[str, Any]:
+    """Convert nested structures to Neo4j-compatible property values.
+
+    Neo4j properties must be primitives or arrays of primitives.
+    Nested dicts and lists-of-dicts are JSON-serialized to strings.
+    """
+    clean: dict[str, Any] = {}
+    for k, v in node.items():
+        if k in _INTERNAL_KEYS:
+            continue
+        if isinstance(v, dict):
+            clean[k] = json.dumps(v)
+        elif isinstance(v, list) and v and isinstance(v[0], dict):
+            clean[k] = json.dumps(v)
+        elif isinstance(v, list):
+            # arrays of primitives are fine
+            clean[k] = v
+        else:
+            clean[k] = v
+    return clean
 
 
 class Neo4jWriter:
@@ -69,15 +96,18 @@ class Neo4jWriter:
         total = 0
         for i in range(0, len(nodes), _BATCH_SIZE):
             batch = nodes[i : i + _BATCH_SIZE]
+            sanitized = []
             for node in batch:
-                node.setdefault("repo_id", repo_id)
-                node.setdefault("commit_sha", commit_sha)
-                node["indexed_at"] = now
+                clean = _sanitize_props(node)
+                clean.setdefault("repo_id", repo_id)
+                clean.setdefault("commit_sha", commit_sha)
+                clean["indexed_at"] = now
+                sanitized.append(clean)
             await self._client.execute_write(
                 f"UNWIND $batch AS props "
                 f"MERGE (n:{label} {{symbol_id: props.symbol_id}}) "
                 f"SET n += props",
-                {"batch": batch},
+                {"batch": sanitized},
             )
             total += len(batch)
         return total

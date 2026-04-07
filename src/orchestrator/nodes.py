@@ -102,40 +102,46 @@ async def _call_mcp_agent(
     tool_name: str,
     tool_args: dict[str, Any],
 ) -> dict[str, Any]:
-    """Call an MCP tool on a child agent via langchain-mcp-adapters.
+    """Call an MCP tool on a child agent via the raw MCP SDK client.
 
-    This is structured for real MCP connectivity.  When the child agent is
-    unavailable (e.g. during development) it returns a graceful fallback.
+    Uses Docker service names when running inside Docker, else localhost.
     """
-    url = f"http://localhost:{port}/mcp/"
-    try:
-        from langchain_mcp_adapters.client import MultiServerMCPClient
+    import asyncio
+    import os
+    from mcp.client.streamable_http import streamablehttp_client
+    from mcp import ClientSession
 
-        async with MultiServerMCPClient(
-            {
-                agent_name: {
-                    "url": url,
-                    "transport": "streamable_http",
-                }
-            }
-        ) as client:
-            tools = client.get_tools()
-            # Find the requested tool
-            target = None
-            for t in tools:
-                if t.name == tool_name:
-                    target = t
-                    break
-            if target is None:
-                return {"error": f"Tool '{tool_name}' not found on {agent_name}"}
-            result = await target.ainvoke(tool_args)
-            # result may be a string or dict
-            if isinstance(result, str):
-                try:
-                    return json.loads(result)
-                except json.JSONDecodeError:
-                    return {"result": result}
-            return result  # type: ignore[return-value]
+    _PORT_TO_SERVICE: dict[int, str] = {
+        settings.ORCHESTRATOR_PORT: "orchestrator",
+        settings.INDEXER_PORT: "indexer",
+        settings.GRAPH_QUERY_PORT: "graph-query",
+        settings.CODE_ANALYST_PORT: "code-analyst",
+        settings.MEMORY_PORT: "memory",
+    }
+
+    if os.path.exists("/.dockerenv"):
+        host = _PORT_TO_SERVICE.get(port, "localhost")
+    else:
+        host = "localhost"
+    url = f"http://{host}:{port}/mcp"
+
+    try:
+        async with asyncio.timeout(120):
+            async with streamablehttp_client(url) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, tool_args)
+
+                    if result.content:
+                        text = result.content[0].text
+                        try:
+                            return json.loads(text)
+                        except (json.JSONDecodeError, TypeError):
+                            return {"result": text}
+                    return {}
+    except asyncio.TimeoutError:
+        logger.error("MCP call to %s/%s timed out", agent_name, tool_name)
+        return {"error": f"{agent_name}/{tool_name} timed out"}
     except Exception as exc:
         logger.warning("MCP call to %s/%s failed: %s", agent_name, tool_name, exc)
         return {"error": f"{agent_name} unavailable: {exc}"}
@@ -167,24 +173,26 @@ async def call_graph_query(state: OrchestratorState) -> dict[str, Any]:
 
     results: dict[str, Any] = {}
 
-    # Try a natural-language search first
-    nl_result = await _call_mcp_agent(
-        "graph_query",
-        settings.GRAPH_QUERY_PORT,
-        "search_code",
-        {"query": query},
-    )
-    results["search"] = nl_result
+    # Build lookup terms: prefer extracted entities, else pull capitalized
+    # words / identifier-like tokens from the query as a heuristic fallback.
+    lookup_terms = list(entities[:3])
+    if not lookup_terms:
+        import re
+        candidates = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", query)
+        stop = {"the", "what", "how", "does", "show", "find", "all", "and",
+                "from", "for", "are", "with", "this", "that", "which",
+                "explain", "compare", "used", "into", "inherits", "inherit",
+                "module", "function", "class", "classes", "functions"}
+        lookup_terms = [c for c in candidates if c.lower() not in stop][:3]
 
-    # If specific entities were extracted, look them up individually
-    for entity in entities[:3]:  # cap to avoid excessive calls
+    for term in lookup_terms:
         entity_result = await _call_mcp_agent(
             "graph_query",
             settings.GRAPH_QUERY_PORT,
             "find_entity",
-            {"name": entity},
+            {"name": term},
         )
-        results[f"entity_{entity}"] = entity_result
+        results[f"entity_{term}"] = entity_result
 
     current_results = dict(state.get("agent_results", {}))
     current_results["graph_query"] = results
@@ -218,7 +226,7 @@ async def call_code_analyst(state: OrchestratorState) -> dict[str, Any]:
             "code_analyst",
             settings.CODE_ANALYST_PORT,
             "find_patterns",
-            {"code_path": entities[0] if entities else "", "pattern_type": ""},
+            {"code_path": entities[0] if entities else "fastapi", "pattern_type": ""},
         )
         results["patterns"] = pat
     elif entities:
@@ -231,14 +239,12 @@ async def call_code_analyst(state: OrchestratorState) -> dict[str, Any]:
         )
         results["explanation"] = expl
     else:
-        # Fallback: pass query text to analyze_function as a best-effort
-        expl = await _call_mcp_agent(
-            "code_analyst",
-            settings.CODE_ANALYST_PORT,
-            "explain_implementation",
-            {"entity_name": query[:120]},
-        )
-        results["explanation"] = expl
+        # No entities extracted — skip code_analyst rather than pass the full
+        # query as an entity_name (which just produces "entity not found").
+        results["skipped"] = {
+            "reason": "no entities extracted from query",
+            "query": query,
+        }
 
     current_results = dict(state.get("agent_results", {}))
     current_results["code_analyst"] = results
@@ -277,12 +283,7 @@ async def call_memory(state: OrchestratorState) -> dict[str, Any]:
 
     # Memory agent tools are expected to be defined in Phase 5.
     # For now, attempt the call; if the agent is unavailable, return empty.
-    session_id = ""
-    for msg in reversed(state["messages"]):
-        if isinstance(msg, dict):
-            session_id = msg.get("session_id", "")
-            if session_id:
-                break
+    session_id = state.get("session_id", "") or ""
 
     result = await _call_mcp_agent(
         "memory",

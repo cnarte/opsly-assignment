@@ -21,12 +21,16 @@ from src.shared.settings import Settings
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("indexer-agent")
+settings = Settings()
+
+mcp = FastMCP(
+    "indexer-agent",
+    host="0.0.0.0",
+    port=settings.INDEXER_PORT,
+)
 
 # In-memory job tracking (lightweight; swap for Redis in production)
 _jobs: dict[str, dict[str, Any]] = {}
-
-settings = Settings()
 
 
 # -- helpers ----------------------------------------------------------------
@@ -40,42 +44,54 @@ def _get_neo4j_client() -> Neo4jClient:
 
 @mcp.tool()
 async def index_repository(repo_url: str, ref: str = "") -> dict:
-    """Full repository indexing - clone repo and run 6-pass pipeline."""
+    """Full repository indexing - clone repo and run 6-pass pipeline.
+
+    Returns immediately with a job_id. Use get_index_status to poll progress.
+    """
+    import asyncio
+
     job_id = str(uuid.uuid4())
     _jobs[job_id] = {"status": "running", "repo_url": repo_url, "ref": ref}
 
-    try:
-        # Clone to temp directory
-        tmp_dir = tempfile.mkdtemp(prefix="indexer_")
-        clone_cmd = ["git", "clone", "--depth", "1"]
-        if ref:
-            clone_cmd += ["--branch", ref]
-        clone_cmd += [repo_url, tmp_dir]
+    async def _run_indexing() -> None:
+        try:
+            # Clone to temp directory
+            tmp_dir = tempfile.mkdtemp(prefix="indexer_")
+            clone_cmd = ["git", "clone", "--depth", "1"]
+            if ref:
+                clone_cmd += ["--branch", ref]
+            clone_cmd += [repo_url, tmp_dir]
 
-        proc = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=300)
-        if proc.returncode != 0:
-            raise IndexingError(f"git clone failed: {proc.stderr.strip()}")
+            _jobs[job_id]["status"] = "cloning"
+            proc = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=300)
+            if proc.returncode != 0:
+                raise IndexingError(f"git clone failed: {proc.stderr.strip()}")
 
-        # Determine commit SHA
-        sha_proc = subprocess.run(
-            ["git", "-C", tmp_dir, "rev-parse", "HEAD"],
-            capture_output=True, text=True,
-        )
-        commit_sha = sha_proc.stdout.strip() if sha_proc.returncode == 0 else ""
+            # Determine commit SHA
+            sha_proc = subprocess.run(
+                ["git", "-C", tmp_dir, "rev-parse", "HEAD"],
+                capture_output=True, text=True,
+            )
+            commit_sha = sha_proc.stdout.strip() if sha_proc.returncode == 0 else ""
 
-        # Run pipeline
-        client = _get_neo4j_client()
-        async with client:
-            writer = Neo4jWriter(client)
-            pipeline = IndexingPipeline(writer)
-            result = await pipeline.run(tmp_dir, repo_url=repo_url, commit_sha=commit_sha)
+            # Run pipeline
+            _jobs[job_id]["status"] = "indexing"
+            client = _get_neo4j_client()
+            async with client:
+                writer = Neo4jWriter(client)
+                pipeline = IndexingPipeline(writer)
+                result = await pipeline.run(tmp_dir, repo_url=repo_url, commit_sha=commit_sha)
 
-        _jobs[job_id] = {"status": "completed", **result}
-        return {"job_id": job_id, **result}
+            _jobs[job_id] = {"status": "completed", **result}
+            logger.info("Indexing job %s completed: %s", job_id, result)
 
-    except Exception as exc:
-        _jobs[job_id] = {"status": "failed", "error": str(exc)}
-        raise
+        except Exception as exc:
+            logger.error("Indexing job %s failed: %s", job_id, exc)
+            _jobs[job_id] = {"status": "failed", "error": str(exc)}
+
+    # Launch background task and return immediately
+    asyncio.create_task(_run_indexing())
+    return {"job_id": job_id, "status": "started"}
 
 
 @mcp.tool()

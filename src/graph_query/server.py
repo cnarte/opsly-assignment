@@ -11,7 +11,11 @@ from src.graph_query.safety import CypherSafetyChecker
 from src.graph_query.traversal import build_context_view, build_impact_graph
 
 settings = Settings()
-mcp = FastMCP("graph-query-agent")
+mcp = FastMCP(
+    "graph-query-agent",
+    host="0.0.0.0",
+    port=settings.GRAPH_QUERY_PORT,
+)
 
 _client: Neo4jClient | None = None
 _safety = CypherSafetyChecker()

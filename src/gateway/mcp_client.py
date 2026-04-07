@@ -18,6 +18,25 @@ settings = Settings()
 # Default timeout for MCP calls (seconds)
 _DEFAULT_TIMEOUT = 120
 
+# Map ports to Docker Compose service names for inter-container communication
+_PORT_TO_SERVICE: dict[int, str] = {
+    settings.ORCHESTRATOR_PORT: "orchestrator",
+    settings.INDEXER_PORT: "indexer",
+    settings.GRAPH_QUERY_PORT: "graph-query",
+    settings.CODE_ANALYST_PORT: "code-analyst",
+    settings.MEMORY_PORT: "memory",
+}
+
+
+def _agent_url(port: int) -> str:
+    """Build MCP URL using Docker service name if in Docker, else localhost."""
+    import os
+    # Inside Docker, /.dockerenv exists
+    if os.path.exists("/.dockerenv"):
+        service = _PORT_TO_SERVICE.get(port, "localhost")
+        return f"http://{service}:{port}/mcp"
+    return f"http://localhost:{port}/mcp"
+
 
 async def call_orchestrator_tool(
     tool_name: str,
@@ -25,12 +44,8 @@ async def call_orchestrator_tool(
     *,
     timeout: float = _DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
-    """Call a tool on the Orchestrator MCP server.
-
-    Establishes a short-lived connection, invokes the tool, and returns
-    the parsed result dict.
-    """
-    url = f"http://localhost:{settings.ORCHESTRATOR_PORT}/mcp/"
+    """Call a tool on the Orchestrator MCP server."""
+    url = _agent_url(settings.ORCHESTRATOR_PORT)
     return await _call_mcp_tool(url, tool_name, arguments, timeout=timeout)
 
 
@@ -42,13 +57,13 @@ async def call_agent_tool(
     timeout: float = _DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Call a tool on an arbitrary agent MCP server by port."""
-    url = f"http://localhost:{port}/mcp/"
+    url = _agent_url(port)
     return await _call_mcp_tool(url, tool_name, arguments, timeout=timeout)
 
 
 async def check_agent_health(name: str, port: int) -> str:
     """Attempt to connect to an agent MCP server and return 'healthy' or 'unhealthy'."""
-    url = f"http://localhost:{port}/mcp/"
+    url = _agent_url(port)
     try:
         async with asyncio.timeout(5):
             async with streamablehttp_client(url) as (read, write, _):
