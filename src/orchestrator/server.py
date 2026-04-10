@@ -38,16 +38,19 @@ _graph = build_orchestrator_graph()
 # ---------------------------------------------------------------------------
 
 
-def _initial_state(message: str, session_id: str = "") -> dict[str, Any]:
+def _initial_state(message: str, session_id: str = "", repo_id: str = "") -> dict[str, Any]:
     """Build a fresh OrchestratorState dict for a new query."""
     return {
         "messages": [HumanMessage(content=message)],
         "query_classification": {},
         "agent_plan": [],
+        "tool_plan": [],
         "agent_results": {},
         "conversation_context": [],
         "final_response": "",
         "session_id": session_id,
+        "cache_key": "",
+        "repo_id": repo_id,
     }
 
 
@@ -65,14 +68,14 @@ async def analyze_query(message: str, session_id: str = "") -> dict:
 
 
 @mcp.tool()
-async def route_to_agents(message: str, session_id: str = "") -> dict:
+async def route_to_agents(message: str, session_id: str = "", repo_id: str = "") -> dict:
     """Determine which agents should handle the query and execute the full pipeline.
 
     This is the main entry point -- it runs the complete LangGraph pipeline
     (classify -> plan -> agent calls -> synthesize) and returns the final
     response together with intermediate results.
     """
-    state = _initial_state(message, session_id)
+    state = _initial_state(message, session_id, repo_id or "")
 
     try:
         final_state = await _graph.ainvoke(state)
@@ -86,7 +89,9 @@ async def route_to_agents(message: str, session_id: str = "") -> dict:
     return {
         "query_classification": final_state.get("query_classification", {}),
         "agent_plan": final_state.get("agent_plan", []),
+        "tool_plan": final_state.get("tool_plan", []),
         "agent_results": _safe_serialise(final_state.get("agent_results", {})),
+        "conversation_context": final_state.get("conversation_context", []),
         "final_response": final_state.get("final_response", ""),
     }
 
@@ -97,10 +102,21 @@ async def get_conversation_context(session_id: str) -> dict:
     result = await _call_mcp_agent(
         "memory",
         settings.MEMORY_PORT,
-        "get_session_history",
+        "get_conversation_context",     # correct tool name
         {"session_id": session_id or "default"},
     )
     return result
+
+
+@mcp.tool()
+async def handle_index_status(job_id: str) -> dict:
+    """Proxy index job status from the Indexer Agent."""
+    return await _call_mcp_agent(
+        "indexer",
+        settings.INDEXER_PORT,
+        "get_index_status",
+        {"job_id": job_id},
+    )
 
 
 @mcp.tool()

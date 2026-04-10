@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -21,6 +23,17 @@ logger = logging.getLogger(__name__)
 
 settings = Settings()
 
+# Tools that are allowed on each agent (used for fallback validation)
+_GRAPH_QUERY_TOOLS = frozenset({
+    "find_entity", "get_dependencies", "get_dependents",
+    "trace_imports", "find_related", "execute_query",
+    "get_symbol_context", "analyze_impact",
+})
+_CODE_ANALYST_TOOLS = frozenset({
+    "explain_implementation", "analyze_function", "analyze_class",
+    "get_code_snippet", "find_patterns", "compare_implementations",
+})
+
 
 def _get_llm() -> ChatOpenRouter:
     """Return a ChatOpenRouter instance configured from settings."""
@@ -32,67 +45,7 @@ def _get_llm() -> ChatOpenRouter:
 
 
 # ---------------------------------------------------------------------------
-# Node: classify_query
-# ---------------------------------------------------------------------------
-
-
-async def classify_query(state: OrchestratorState) -> dict[str, Any]:
-    """Use the LLM to classify the user query by intent, entities, and complexity."""
-
-    # Grab the latest human message as the query
-    query = ""
-    for msg in reversed(state["messages"]):
-        if isinstance(msg, HumanMessage) or (isinstance(msg, dict) and msg.get("role") == "user"):
-            query = msg.content if hasattr(msg, "content") else msg.get("content", "")
-            break
-
-    if not query:
-        return {
-            "query_classification": {
-                "intent": "general",
-                "entities": [],
-                "complexity": "simple",
-            }
-        }
-
-    llm = _get_llm()
-    try:
-        response = await llm.ainvoke([
-            SystemMessage(content=QUERY_CLASSIFICATION_PROMPT),
-            HumanMessage(content=query),
-        ])
-        classification = json.loads(response.content)
-    except (json.JSONDecodeError, Exception) as exc:
-        logger.warning("Classification failed (%s), falling back to general.", exc)
-        classification = {
-            "intent": "general",
-            "entities": [],
-            "complexity": "simple",
-        }
-
-    # Ensure required keys exist
-    classification.setdefault("intent", "general")
-    classification.setdefault("entities", [])
-    classification.setdefault("complexity", "simple")
-
-    return {"query_classification": classification}
-
-
-# ---------------------------------------------------------------------------
-# Node: plan_agents
-# ---------------------------------------------------------------------------
-
-
-async def plan_agents(state: OrchestratorState) -> dict[str, Any]:
-    """Decide which child agents to invoke based on the classification."""
-
-    intent = state.get("query_classification", {}).get("intent", "general")
-    plan = AGENT_SELECTION_MAP.get(intent, ["code_analyst"])
-    return {"agent_plan": plan}
-
-
-# ---------------------------------------------------------------------------
-# MCP call helpers
+# MCP call helper
 # ---------------------------------------------------------------------------
 
 
@@ -125,32 +78,55 @@ async def _call_mcp_agent(
         host = "localhost"
     url = f"http://{host}:{port}/mcp"
 
-    try:
-        async with asyncio.timeout(120):
-            async with streamablehttp_client(url) as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    result = await session.call_tool(tool_name, tool_args)
+    timeout_s = getattr(settings, "MCP_CALL_TIMEOUT_S", 120)
+    retries = getattr(settings, "MCP_CALL_RETRIES", 0)
 
-                    if result.content:
-                        text = result.content[0].text
-                        try:
-                            return json.loads(text)
-                        except (json.JSONDecodeError, TypeError):
-                            return {"result": text}
-                    return {}
-    except asyncio.TimeoutError:
-        logger.error("MCP call to %s/%s timed out", agent_name, tool_name)
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            async with asyncio.timeout(timeout_s):
+                async with streamablehttp_client(url) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        result = await session.call_tool(tool_name, tool_args)
+
+                        if result.content:
+                            text = result.content[0].text
+                            try:
+                                return json.loads(text)
+                            except (json.JSONDecodeError, TypeError):
+                                return {"result": text}
+                        return {}
+        except asyncio.TimeoutError as exc:
+            last_error = exc
+            logger.warning(
+                "MCP call to %s/%s timed out (attempt %d/%d)",
+                agent_name, tool_name, attempt + 1, retries + 1,
+            )
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "MCP call to %s/%s failed (attempt %d/%d): %s",
+                agent_name, tool_name, attempt + 1, retries + 1, exc,
+            )
+            break  # non-timeout errors are not retried
+
+    if isinstance(last_error, asyncio.TimeoutError):
         return {"error": f"{agent_name}/{tool_name} timed out"}
-    except Exception as exc:
-        logger.warning("MCP call to %s/%s failed: %s", agent_name, tool_name, exc)
-        return {"error": f"{agent_name} unavailable: {exc}"}
+    return {"error": f"{agent_name} unavailable: {last_error}"}
+
+
+# ---------------------------------------------------------------------------
+# State extraction helpers
+# ---------------------------------------------------------------------------
 
 
 def _extract_query(state: OrchestratorState) -> str:
     """Extract the user query text from state messages."""
     for msg in reversed(state["messages"]):
-        if isinstance(msg, HumanMessage) or (isinstance(msg, dict) and msg.get("role") == "user"):
+        if isinstance(msg, HumanMessage) or (
+            isinstance(msg, dict) and msg.get("role") == "user"
+        ):
             return msg.content if hasattr(msg, "content") else msg.get("content", "")
     return ""
 
@@ -158,6 +134,156 @@ def _extract_query(state: OrchestratorState) -> str:
 def _extract_entities(state: OrchestratorState) -> list[str]:
     """Return the entity list from classification."""
     return state.get("query_classification", {}).get("entities", [])
+
+
+def _heuristic_terms(query: str, n: int = 3) -> list[str]:
+    """Extract identifier-like tokens from a free-text query as a fallback."""
+    stop = {
+        "the", "what", "how", "does", "show", "find", "all", "and",
+        "from", "for", "are", "with", "this", "that", "which",
+        "explain", "compare", "used", "into", "inherits", "inherit",
+        "module", "function", "class", "classes", "functions",
+        "does", "use", "where", "about", "give", "list", "get",
+    }
+    candidates = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", query)
+    return [c for c in candidates if c.lower() not in stop][:n]
+
+
+# ---------------------------------------------------------------------------
+# Node: check_cache
+# ---------------------------------------------------------------------------
+
+
+async def check_cache(state: OrchestratorState) -> dict[str, Any]:
+    """Check Redis cache for this query before running the full pipeline."""
+    query = _extract_query(state)
+    session_id = state.get("session_id", "") or ""
+    repo_id = state.get("repo_id", "") or ""
+    raw = (query[:200] + session_id + repo_id).encode()
+    cache_key = hashlib.sha256(raw).hexdigest()[:16]
+
+    result = await _call_mcp_agent(
+        "memory",
+        settings.MEMORY_PORT,
+        "get_cached_response",
+        {"cache_key": cache_key},
+    )
+
+    if isinstance(result, dict) and result.get("status") == "hit":
+        logger.info("Cache hit for key %s", cache_key)
+        return {
+            "cache_key": cache_key,
+            "final_response": result.get("response", ""),
+        }
+
+    return {"cache_key": cache_key}
+
+
+# ---------------------------------------------------------------------------
+# Node: classify_query
+# ---------------------------------------------------------------------------
+
+
+async def classify_query(state: OrchestratorState) -> dict[str, Any]:
+    """Use the LLM to classify the user query by intent, entities, and tool plan."""
+
+    query = _extract_query(state)
+    if not query:
+        return {
+            "query_classification": {
+                "intent": "general",
+                "entities": [],
+                "complexity": "simple",
+            },
+            "tool_plan": [],
+        }
+
+    llm = _get_llm()
+    try:
+        response = await llm.ainvoke([
+            SystemMessage(content=QUERY_CLASSIFICATION_PROMPT),
+            HumanMessage(content=query),
+        ])
+        raw = json.loads(response.content)
+    except (json.JSONDecodeError, Exception) as exc:
+        logger.warning("Classification failed (%s), falling back to general.", exc)
+        raw = {}
+
+    intent = raw.get("intent", "general")
+    entities = raw.get("entities", [])
+    complexity = raw.get("complexity", "simple")
+
+    # Validate and sanitise tool_plan
+    tool_plan: list[dict] = []
+    for entry in raw.get("tool_plan", []):
+        if not isinstance(entry, dict):
+            continue
+        agent = entry.get("agent", "")
+        tool = entry.get("tool", "")
+        args = entry.get("args", {})
+        if (
+            agent in {"graph_query", "code_analyst"}
+            and isinstance(tool, str) and tool
+            and isinstance(args, dict)
+        ):
+            tool_plan.append({"agent": agent, "tool": tool, "args": args})
+
+    # Deterministic override: lifecycle / flow / context queries must use
+    # get_symbol_context — the LLM sometimes misclassifies these as
+    # code_explanation and picks find_entity, which produces huge payloads
+    # that overflow the synthesis context window.
+    _LIFECYCLE_KEYWORDS = {
+        "lifecycle", "life cycle", "life-cycle", "request flow", "request lifecycle",
+        "how does", "360", "symbol context", "what calls", "who calls",
+        "full flow", "end to end", "end-to-end",
+    }
+    q_lower = query.lower()
+    if any(kw in q_lower for kw in _LIFECYCLE_KEYWORDS):
+        primary = entities[0] if entities else "FastAPI"
+        tool_plan = [
+            {"agent": "graph_query", "tool": "get_symbol_context",
+             "args": {"symbol_name": primary}},
+        ]
+        intent = "relationship_query"
+        logger.info("Lifecycle/flow override: forcing get_symbol_context(%s)", primary)
+
+    return {
+        "query_classification": {
+            "intent": intent,
+            "entities": entities if isinstance(entities, list) else [],
+            "complexity": complexity,
+        },
+        "tool_plan": tool_plan,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: plan_agents
+# ---------------------------------------------------------------------------
+
+
+async def plan_agents(state: OrchestratorState) -> dict[str, Any]:
+    """Decide which child agents to invoke based on the tool plan / classification."""
+
+    tool_plan = state.get("tool_plan", [])
+    if tool_plan:
+        # Derive the unique set of agents from the tool plan, preserving order
+        seen: set[str] = set()
+        agents: list[str] = []
+        for entry in tool_plan:
+            a = entry.get("agent", "")
+            if a and a not in seen:
+                seen.add(a)
+                agents.append(a)
+    else:
+        intent = state.get("query_classification", {}).get("intent", "general")
+        agents = list(AGENT_SELECTION_MAP.get(intent, ["graph_query", "code_analyst"]))
+
+    # Always fetch conversation context from memory
+    if "memory" not in agents:
+        agents = ["memory"] + agents
+
+    return {"agent_plan": agents}
 
 
 # ---------------------------------------------------------------------------
@@ -170,29 +296,45 @@ async def call_graph_query(state: OrchestratorState) -> dict[str, Any]:
 
     query = _extract_query(state)
     entities = _extract_entities(state)
+    tool_plan = state.get("tool_plan", [])
+    repo_id = state.get("repo_id", "") or ""
 
     results: dict[str, Any] = {}
 
-    # Build lookup terms: prefer extracted entities, else pull capitalized
-    # words / identifier-like tokens from the query as a heuristic fallback.
-    lookup_terms = list(entities[:3])
-    if not lookup_terms:
-        import re
-        candidates = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", query)
-        stop = {"the", "what", "how", "does", "show", "find", "all", "and",
-                "from", "for", "are", "with", "this", "that", "which",
-                "explain", "compare", "used", "into", "inherits", "inherit",
-                "module", "function", "class", "classes", "functions"}
-        lookup_terms = [c for c in candidates if c.lower() not in stop][:3]
+    # Filter steps for this agent
+    steps = [s for s in tool_plan if s.get("agent") == "graph_query"]
 
-    for term in lookup_terms:
-        entity_result = await _call_mcp_agent(
-            "graph_query",
-            settings.GRAPH_QUERY_PORT,
-            "find_entity",
-            {"name": term},
-        )
-        results[f"entity_{term}"] = entity_result
+    if steps:
+        for step in steps:
+            tool = step.get("tool", "find_entity")
+            args = {**step.get("args", {}), "repo_id": repo_id}
+
+            # Only call known tools
+            if tool not in _GRAPH_QUERY_TOOLS:
+                logger.warning("Unknown graph_query tool in plan: %s — skipping", tool)
+                continue
+
+            result = await _call_mcp_agent(
+                "graph_query", settings.GRAPH_QUERY_PORT, tool, args,
+            )
+
+            results[tool] = result
+            # If the planned tool fails, also try find_entity as a fallback
+            if "error" in result and tool != "find_entity" and entities:
+                logger.info("graph_query/%s failed, falling back to find_entity", tool)
+                fallback = await _call_mcp_agent(
+                    "graph_query", settings.GRAPH_QUERY_PORT,
+                    "find_entity", {"name": entities[0], "repo_id": repo_id},
+                )
+                results[f"{tool}_fallback"] = fallback
+    else:
+        # No tool plan — heuristic fallback: find_entity for each term
+        lookup_terms = entities[:3] or _heuristic_terms(query)
+        for term in lookup_terms:
+            results[f"entity_{term}"] = await _call_mcp_agent(
+                "graph_query", settings.GRAPH_QUERY_PORT,
+                "find_entity", {"name": term, "repo_id": repo_id},
+            )
 
     current_results = dict(state.get("agent_results", {}))
     current_results["graph_query"] = results
@@ -207,44 +349,61 @@ async def call_graph_query(state: OrchestratorState) -> dict[str, Any]:
 async def call_code_analyst(state: OrchestratorState) -> dict[str, Any]:
     """Invoke the Code Analyst Agent MCP server."""
 
-    query = _extract_query(state)
     entities = _extract_entities(state)
     intent = state.get("query_classification", {}).get("intent", "general")
+    tool_plan = state.get("tool_plan", [])
 
     results: dict[str, Any] = {}
 
-    if intent == "comparison" and len(entities) >= 2:
-        cmp = await _call_mcp_agent(
-            "code_analyst",
-            settings.CODE_ANALYST_PORT,
-            "compare_implementations",
-            {"entity_a": entities[0], "entity_b": entities[1]},
-        )
-        results["comparison"] = cmp
-    elif intent == "pattern_analysis":
-        pat = await _call_mcp_agent(
-            "code_analyst",
-            settings.CODE_ANALYST_PORT,
-            "find_patterns",
-            {"code_path": entities[0] if entities else "fastapi", "pattern_type": ""},
-        )
-        results["patterns"] = pat
-    elif entities:
-        # Default: explain the first entity
-        expl = await _call_mcp_agent(
-            "code_analyst",
-            settings.CODE_ANALYST_PORT,
-            "explain_implementation",
-            {"entity_name": entities[0]},
-        )
-        results["explanation"] = expl
+    # Filter steps for this agent
+    steps = [s for s in tool_plan if s.get("agent") == "code_analyst"]
+
+    if steps:
+        for step in steps:
+            tool = step.get("tool", "explain_implementation")
+            args = step.get("args", {})
+
+            if tool not in _CODE_ANALYST_TOOLS:
+                logger.warning("Unknown code_analyst tool in plan: %s — skipping", tool)
+                continue
+
+            result = await _call_mcp_agent(
+                "code_analyst", settings.CODE_ANALYST_PORT, tool, args,
+            )
+
+            results[tool] = result
+            # If the planned tool fails, also try explain_implementation as fallback
+            if "error" in result and tool != "explain_implementation" and entities:
+                logger.info("code_analyst/%s failed, falling back to explain_implementation", tool)
+                fallback = await _call_mcp_agent(
+                    "code_analyst", settings.CODE_ANALYST_PORT,
+                    "explain_implementation", {"entity_name": entities[0]},
+                )
+                results[f"{tool}_fallback"] = fallback
     else:
-        # No entities extracted — skip code_analyst rather than pass the full
-        # query as an entity_name (which just produces "entity not found").
-        results["skipped"] = {
-            "reason": "no entities extracted from query",
-            "query": query,
-        }
+        # No tool plan — intent-based fallback (original behaviour)
+        if intent == "comparison" and len(entities) >= 2:
+            results["comparison"] = await _call_mcp_agent(
+                "code_analyst", settings.CODE_ANALYST_PORT,
+                "compare_implementations",
+                {"entity_a": entities[0], "entity_b": entities[1]},
+            )
+        elif intent == "pattern_analysis":
+            results["patterns"] = await _call_mcp_agent(
+                "code_analyst", settings.CODE_ANALYST_PORT,
+                "find_patterns",
+                {"code_path": entities[0] if entities else "fastapi", "pattern_type": ""},
+            )
+        elif entities:
+            results["explanation"] = await _call_mcp_agent(
+                "code_analyst", settings.CODE_ANALYST_PORT,
+                "explain_implementation",
+                {"entity_name": entities[0]},
+            )
+        else:
+            results["skipped"] = {
+                "reason": "no entities extracted from query",
+            }
 
     current_results = dict(state.get("agent_results", {}))
     current_results["code_analyst"] = results
@@ -258,8 +417,6 @@ async def call_code_analyst(state: OrchestratorState) -> dict[str, Any]:
 
 async def call_indexer(state: OrchestratorState) -> dict[str, Any]:
     """Invoke the Indexer Agent MCP server (for index requests)."""
-
-    query = _extract_query(state)
 
     result = await _call_mcp_agent(
         "indexer",
@@ -279,21 +436,42 @@ async def call_indexer(state: OrchestratorState) -> dict[str, Any]:
 
 
 async def call_memory(state: OrchestratorState) -> dict[str, Any]:
-    """Invoke the Memory Agent MCP server to fetch conversation context."""
+    """Invoke the Memory Agent MCP server to fetch conversation context, preferences, and facts."""
 
-    # Memory agent tools are expected to be defined in Phase 5.
-    # For now, attempt the call; if the agent is unavailable, return empty.
-    session_id = state.get("session_id", "") or ""
+    session_id = state.get("session_id", "") or "default"
+    query = _extract_query(state)
 
-    result = await _call_mcp_agent(
+    # 1. Short-term: recent conversation turns from Redis
+    ctx_result = await _call_mcp_agent(
         "memory",
         settings.MEMORY_PORT,
-        "get_session_history",
-        {"session_id": session_id or "default"},
+        "get_conversation_context",
+        {"session_id": session_id},
+    )
+    context = ctx_result.get("messages", []) if isinstance(ctx_result, dict) else []
+
+    # 2. Long-term: semantic search over past interactions in Neo4j
+    search_result = await _call_mcp_agent(
+        "memory",
+        settings.MEMORY_PORT,
+        "search_memory",
+        {"query": query, "session_id": session_id, "limit": 5},
     )
 
-    context = result.get("messages", []) if isinstance(result, dict) else []
-    return {"conversation_context": context}
+    # 3. User preferences / facts stored in Neo4j
+    prefs_result = await _call_mcp_agent(
+        "memory",
+        settings.MEMORY_PORT,
+        "get_user_preferences",
+        {"session_id": session_id},
+    )
+
+    current_results = dict(state.get("agent_results", {}))
+    current_results["memory"] = {
+        "long_term_facts": search_result.get("results", []) if isinstance(search_result, dict) else [],
+        "preferences": prefs_result.get("preferences", []) if isinstance(prefs_result, dict) else [],
+    }
+    return {"conversation_context": context, "agent_results": current_results}
 
 
 # ---------------------------------------------------------------------------
@@ -307,18 +485,27 @@ async def synthesize(state: OrchestratorState) -> dict[str, Any]:
     query = _extract_query(state)
     agent_results = state.get("agent_results", {})
 
-    # Build a summary of agent outputs for the LLM
     parts: list[str] = []
     for agent_name, result in agent_results.items():
-        parts.append(f"--- {agent_name} ---\n{json.dumps(result, indent=2, default=str)}")
+        if agent_name == "memory":
+            continue  # memory context added separately; skip from agent dump
+        raw = json.dumps(result, default=str)
+        # Cap each agent block to 1 500 chars — free model has a small context window
+        if len(raw) > 1500:
+            raw = raw[:1500] + " … [truncated]"
+        parts.append(f"--- {agent_name} ---\n{raw}")
     agent_summary = "\n\n".join(parts) if parts else "(no agent results)"
 
+    # Include at most last 2 conversation turns, capped at 400 chars each
     context_msgs = state.get("conversation_context", [])
     context_text = ""
     if context_msgs:
-        context_text = "\n\nPrior conversation context:\n" + json.dumps(
-            context_msgs[-5:], indent=2, default=str
-        )
+        recent = context_msgs[-2:]
+        trimmed = []
+        for m in recent:
+            s = json.dumps(m, default=str)
+            trimmed.append(s[:400] + ("…" if len(s) > 400 else ""))
+        context_text = "\n\nRecent context:\n" + "\n".join(trimmed)
 
     user_prompt = (
         f"User query: {query}\n\n"
@@ -336,7 +523,60 @@ async def synthesize(state: OrchestratorState) -> dict[str, Any]:
         final = response.content
     except Exception as exc:
         logger.error("Synthesis LLM call failed: %s", exc)
-        # Fallback: just dump the raw results
         final = f"I found the following results but could not synthesise them:\n\n{agent_summary}"
 
     return {"final_response": final}
+
+
+# ---------------------------------------------------------------------------
+# Node: persist_interaction
+# ---------------------------------------------------------------------------
+
+
+async def persist_interaction(state: OrchestratorState) -> dict[str, Any]:
+    """Persist the Q&A pair to Memory and cache the response for future hits."""
+
+    query = _extract_query(state)
+    final_response = state.get("final_response", "")
+    session_id = state.get("session_id", "") or "default"
+    cache_key = state.get("cache_key", "")
+    agent_plan = state.get("agent_plan", [])
+
+    if not query or not final_response:
+        return {}
+
+    agents_used = [a for a in agent_plan if a != "memory"]
+
+    # Store Q&A in Redis (short-term) and Neo4j (long-term)
+    try:
+        await _call_mcp_agent(
+            "memory",
+            settings.MEMORY_PORT,
+            "store_interaction",
+            {
+                "session_id": session_id,
+                "query": query,
+                "response": final_response[:2000],
+                "agents_used": agents_used,
+            },
+        )
+    except Exception as exc:
+        logger.warning("persist_interaction: store_interaction failed: %s", exc)
+
+    # Cache the response so repeated identical queries are fast
+    if cache_key:
+        try:
+            await _call_mcp_agent(
+                "memory",
+                settings.MEMORY_PORT,
+                "cache_response",
+                {
+                    "cache_key": cache_key,
+                    "response": final_response[:2000],
+                    "ttl": 3600,
+                },
+            )
+        except Exception as exc:
+            logger.warning("persist_interaction: cache_response failed: %s", exc)
+
+    return {}

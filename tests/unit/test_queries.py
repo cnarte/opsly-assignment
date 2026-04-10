@@ -22,7 +22,7 @@ class TestFindEntity:
     def test_with_entity_type(self) -> None:
         q = find_entity("MyClass", "Class")
         assert "MATCH (n:Class)" in q.cypher
-        assert q.parameters == {"name": "MyClass"}
+        assert q.parameters == {"name": "MyClass", "repo_id": ""}
         assert "$name" in q.cypher
 
     def test_without_entity_type(self) -> None:
@@ -30,7 +30,7 @@ class TestFindEntity:
         # Should produce UNION across entity labels, no bare MATCH (n)
         assert "UNION" in q.cypher
         assert "MATCH (n:" in q.cypher
-        assert q.parameters == {"name": "some_func"}
+        assert q.parameters == {"name": "some_func", "repo_id": ""}
 
     def test_invalid_entity_type_raises(self) -> None:
         with pytest.raises(ValueError, match="Unknown entity type"):
@@ -40,7 +40,7 @@ class TestFindEntity:
 class TestGetDependencies:
     def test_produces_parameterized_query(self) -> None:
         q = get_dependencies("MyClass")
-        assert q.parameters == {"name": "MyClass"}
+        assert q.parameters == {"name": "MyClass", "repo_id": ""}
         assert "CALLS|IMPORTS|DEPENDS_ON|INHERITS_FROM" in q.cypher
         assert "$name" in q.cypher
         # Must use explicit labels
@@ -50,7 +50,7 @@ class TestGetDependencies:
 class TestGetDependents:
     def test_produces_parameterized_query(self) -> None:
         q = get_dependents("my_func")
-        assert q.parameters == {"name": "my_func"}
+        assert q.parameters == {"name": "my_func", "repo_id": ""}
         assert "$name" in q.cypher
         assert "MATCH" in q.cypher
 
@@ -58,7 +58,7 @@ class TestGetDependents:
 class TestTraceImports:
     def test_produces_import_chain_query(self) -> None:
         q = trace_imports("utils")
-        assert q.parameters == {"name": "utils"}
+        assert q.parameters == {"name": "utils", "repo_id": ""}
         assert "Module" in q.cypher
         assert "IMPORTS" in q.cypher
         assert "*1..5" in q.cypher
@@ -67,14 +67,14 @@ class TestTraceImports:
 class TestFindRelated:
     def test_produces_relationship_query(self) -> None:
         q = find_related("MyClass", "INHERITS_FROM")
-        assert q.parameters == {"name": "MyClass"}
+        assert q.parameters == {"name": "MyClass", "repo_id": ""}
         assert "INHERITS_FROM" in q.cypher
 
 
 class TestGetSymbolContext:
     def test_produces_bidirectional_query(self) -> None:
         q = get_symbol_context("my_func")
-        assert q.parameters == {"name": "my_func"}
+        assert q.parameters == {"name": "my_func", "repo_id": ""}
         assert "outgoing" in q.cypher
         assert "incoming" in q.cypher
 
@@ -82,7 +82,7 @@ class TestGetSymbolContext:
 class TestImpactAtDepth:
     def test_produces_depth_query(self) -> None:
         q = impact_at_depth("my_func", 3)
-        assert q.parameters == {"name": "my_func"}
+        assert q.parameters == {"name": "my_func", "repo_id": ""}
         assert "*1..3" in q.cypher
         assert "depth" in q.cypher
 

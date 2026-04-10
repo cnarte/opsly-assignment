@@ -57,6 +57,11 @@ services:
       redis:
         condition: service_healthy
     env_file: .env
+    environment:
+      # Override timeout so orchestrator can chain multiple LLM calls (compare_implementations etc.)
+      # Retries set to 0 to avoid 2×timeout stacking on long compare_implementations calls
+      MCP_CALL_TIMEOUT_S: "300"
+      MCP_CALL_RETRIES: "0"
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8010),2); s.close()"]
       interval: 10s
@@ -130,6 +135,24 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  ui:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ui
+    ports:
+      - "8501:8501"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      GATEWAY_URL: http://gateway:8000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8501),2); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
 volumes:
   neo4j_data:

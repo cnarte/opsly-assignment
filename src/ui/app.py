@@ -17,7 +17,8 @@ from streamlit_agraph import agraph, Node, Edge, Config
 # Config
 # ---------------------------------------------------------------------------
 
-API_BASE = "http://localhost:8000"
+import os
+API_BASE = os.getenv("GATEWAY_URL", "http://localhost:8000")
 REQUEST_TIMEOUT = 300
 
 AGENT_COLORS = {
@@ -70,6 +71,12 @@ def api_post(path: str, data: dict, timeout: int = REQUEST_TIMEOUT) -> dict[str,
         return {"error": str(e)}
 
 
+def _repo_id_from_url(url: str) -> str:
+    """Derive a short repo identifier from a git URL, e.g. 'fastapi/fastapi'."""
+    parts = url.rstrip("/").removesuffix(".git").split("/")
+    return f"{parts[-2]}/{parts[-1]}" if len(parts) >= 2 else (parts[-1] if parts else "local")
+
+
 # ---------------------------------------------------------------------------
 # Page config & styling
 # ---------------------------------------------------------------------------
@@ -83,9 +90,9 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    /* Dark premium theme overrides */
+    /* Light theme */
     .stApp {
-        background-color: #0F1117;
+        background-color: #FFFFFF;
     }
 
     /* Agent badges */
@@ -109,31 +116,31 @@ st.markdown("""
         display: inline-block;
         margin-right: 6px;
     }
-    .status-healthy { background-color: #10B981; box-shadow: 0 0 6px #10B981; }
-    .status-unhealthy { background-color: #EF4444; box-shadow: 0 0 6px #EF4444; }
+    .status-healthy { background-color: #10B981; }
+    .status-unhealthy { background-color: #EF4444; }
 
     /* Chat messages */
     .chat-user {
-        background: linear-gradient(135deg, #1E293B 0%, #334155 100%);
-        border: 1px solid #475569;
+        background: #F1F5F9;
+        border: 1px solid #E2E8F0;
         border-radius: 12px;
         padding: 14px 18px;
         margin: 8px 0;
-        color: #F1F5F9;
+        color: #0F172A;
     }
     .chat-assistant {
-        background: linear-gradient(135deg, #0F172A 0%, #1E1B4B 100%);
-        border: 1px solid #312E81;
+        background: #F8F7FF;
+        border: 1px solid #DDD6FE;
         border-radius: 12px;
         padding: 14px 18px;
         margin: 8px 0;
-        color: #E2E8F0;
+        color: #0F172A;
     }
 
     /* Agent activity panel */
     .agent-activity {
-        background: #1E293B;
-        border: 1px solid #334155;
+        background: #F8FAFC;
+        border: 1px solid #E2E8F0;
         border-radius: 10px;
         padding: 12px 16px;
         margin: 6px 0;
@@ -141,8 +148,8 @@ st.markdown("""
 
     /* Metric cards */
     .metric-card {
-        background: linear-gradient(135deg, #1E293B 0%, #0F172A 100%);
-        border: 1px solid #334155;
+        background: #F8FAFC;
+        border: 1px solid #E2E8F0;
         border-radius: 12px;
         padding: 20px;
         text-align: center;
@@ -150,13 +157,11 @@ st.markdown("""
     .metric-value {
         font-size: 2rem;
         font-weight: 700;
-        background: linear-gradient(135deg, #60A5FA, #A78BFA);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
+        color: #8B5CF6;
     }
     .metric-label {
         font-size: 0.85rem;
-        color: #94A3B8;
+        color: #64748B;
         margin-top: 4px;
     }
 
@@ -172,16 +177,16 @@ st.markdown("""
 
     /* Graph container */
     .graph-container {
-        background: #0F172A;
-        border: 1px solid #1E293B;
+        background: #F8FAFC;
+        border: 1px solid #E2E8F0;
         border-radius: 12px;
         padding: 8px;
     }
 
     /* Sidebar styling */
     [data-testid="stSidebar"] {
-        background-color: #0F172A;
-        border-right: 1px solid #1E293B;
+        background-color: #F8FAFC;
+        border-right: 1px solid #E2E8F0;
     }
 
     /* Hide streamlit branding */
@@ -206,6 +211,10 @@ if "last_graph_data" not in st.session_state:
     st.session_state.last_graph_data = None
 if "indexing_job" not in st.session_state:
     st.session_state.indexing_job = None
+if "indexed_repos" not in st.session_state:
+    st.session_state.indexed_repos = []
+if "active_repo_id" not in st.session_state:
+    st.session_state.active_repo_id = ""
 
 
 # ---------------------------------------------------------------------------
@@ -294,9 +303,24 @@ with st.sidebar:
                 result = api_post("/api/index", {"repo_url": repo_url, "ref": ref})
                 if "error" not in result:
                     st.session_state.indexing_job = result.get("job_id")
+                    rid = _repo_id_from_url(repo_url)
+                    if rid not in st.session_state.indexed_repos:
+                        st.session_state.indexed_repos.append(rid)
+                    st.session_state.active_repo_id = rid
                     st.success(f"Job started: `{result.get('job_id', 'unknown')[:8]}...`")
                 else:
                     st.error(result["error"])
+
+    # Repository scope selector
+    if st.session_state.indexed_repos:
+        st.session_state.active_repo_id = st.selectbox(
+            "Active Repository",
+            options=[""] + st.session_state.indexed_repos,
+            index=([""] + st.session_state.indexed_repos).index(
+                st.session_state.active_repo_id
+            ) if st.session_state.active_repo_id in st.session_state.indexed_repos else 0,
+            format_func=lambda x: "All repos" if x == "" else x,
+        )
 
     # Index status polling
     if st.session_state.indexing_job:
@@ -385,7 +409,11 @@ with chat_col:
                 with st.spinner("🔄 Agents are analyzing your query..."):
                     result = api_post(
                         "/api/chat",
-                        {"message": prompt, "session_id": st.session_state.session_id},
+                        {
+                            "message": prompt,
+                            "session_id": st.session_state.session_id,
+                            "repo_id": st.session_state.active_repo_id,
+                        },
                     )
 
                 response = result.get("response", result.get("error", "No response"))
@@ -477,6 +505,99 @@ with panel_col:
     with tab_graph:
         graph_data = st.session_state.last_graph_data
 
+        def _build_graph(gd: dict) -> tuple[list, list]:
+            """Convert graph_query agent results into agraph Node/Edge lists."""
+            g_nodes: list[Node] = []
+            g_edges: list[Edge] = []
+            seen: set[str] = set()
+
+            def _node(name: str, labels: list | None = None, size: int = 18) -> str:
+                if name and name not in seen:
+                    seen.add(name)
+                    kind = (labels or [""])[0]
+                    color = LABEL_COLORS.get(kind, "#64748B")
+                    g_nodes.append(Node(id=name, label=name, size=size, color=color,
+                                        font={"color": "#E2E8F0"}))
+                return name
+
+            def _edge(src: str, tgt: str, label: str = "", color: str = "#475569") -> None:
+                if src and tgt:
+                    g_edges.append(Edge(source=src, target=tgt, label=label, color=color))
+
+            for tool_result in gd.values():
+                if not isinstance(tool_result, dict):
+                    continue
+
+                # find_entity → {"results": [{"n": {...}}], "count": N}  (no "entity" key)
+                if "results" in tool_result and "entity" not in tool_result:
+                    for item in tool_result.get("results", []):
+                        if not isinstance(item, dict):
+                            continue
+                        props = item.get("n", item)
+                        if isinstance(props, dict):
+                            name = props.get("name") or props.get("qualified_name", "")
+                            kind = props.get("kind", "")
+                            _node(name, [kind.capitalize()] if kind else None, 22)
+
+                # get_dependencies → {"entity": "...", "dependencies": [...]}
+                for r in tool_result.get("dependencies", []):
+                    src = r.get("source", tool_result.get("entity", ""))
+                    tgt = r.get("target", "")
+                    _node(src, None, 24)
+                    _node(tgt, r.get("target_labels", []), 18)
+                    _edge(src, tgt, r.get("rel", ""), "#3B82F6")
+
+                # get_dependents → {"entity": "...", "dependents": [...]}
+                for r in tool_result.get("dependents", []):
+                    src = r.get("source", "")
+                    tgt = r.get("target", tool_result.get("entity", ""))
+                    _node(src, r.get("source_labels", []), 18)
+                    _node(tgt, None, 24)
+                    _edge(src, tgt, r.get("rel", ""), "#10B981")
+
+                # find_related → {"entity": "...", "results": [...], "relationship": "..."}
+                if "results" in tool_result and "entity" in tool_result:
+                    for r in tool_result.get("results", []):
+                        src = r.get("source", tool_result.get("entity", ""))
+                        tgt = r.get("target", "")
+                        _node(src, None, 24)
+                        _node(tgt, r.get("target_labels", []), 18)
+                        _edge(src, tgt, r.get("rel", ""), "#8B5CF6")
+
+                # get_symbol_context → {"symbol": "...", "outgoing": [...], "incoming": [...]}
+                symbol = tool_result.get("symbol", "")
+                if symbol and ("outgoing" in tool_result or "incoming" in tool_result):
+                    _node(symbol, None, 28)
+                    for r in tool_result.get("outgoing", []):
+                        related = r.get("related_name", "")
+                        _node(related, r.get("related_labels", []), 18)
+                        _edge(symbol, related, r.get("relationship") or r.get("rel", ""), "#3B82F6")
+                    for r in tool_result.get("incoming", []):
+                        related = r.get("related_name", "")
+                        _node(related, r.get("related_labels", []), 18)
+                        _edge(related, symbol, r.get("relationship") or r.get("rel", ""), "#10B981")
+
+                # analyze_impact → {"symbol": "...", "levels": {"1": [...], "2": [...]}}
+                symbol = tool_result.get("symbol", "")
+                levels = tool_result.get("levels", {})
+                if symbol and levels:
+                    _node(symbol, None, 28)
+                    for depth_str, lvl in levels.items():
+                        for n_info in lvl:
+                            name = n_info.get("name", "")
+                            _node(name, n_info.get("labels", []), 18)
+                            _edge(name, symbol, f"depth {depth_str}", "#F59E0B")
+
+                # trace_imports → {"import_chains": [{"chain": ["mod_a", "mod_b", ...]}]}
+                for chain_rec in tool_result.get("import_chains", []):
+                    chain = chain_rec.get("chain", [])
+                    for i, mod in enumerate(chain):
+                        _node(mod, ["Module"], 18)
+                        if i > 0:
+                            _edge(chain[i - 1], mod, "IMPORTS", "#EF4444")
+
+            return g_nodes, g_edges
+
         if not graph_data:
             st.markdown(
                 '<div style="text-align:center;padding:40px;color:#64748B;">'
@@ -487,63 +608,7 @@ with panel_col:
                 unsafe_allow_html=True,
             )
         else:
-            # Build nodes and edges from graph query results
-            nodes: list[Node] = []
-            edges: list[Edge] = []
-            seen_nodes: set[str] = set()
-
-            def _add_entity(data: dict, prefix: str = "") -> None:
-                """Extract entities from graph query result and build graph nodes."""
-                if isinstance(data, dict):
-                    # Handle search results
-                    results_list = data.get("results", data.get("result", []))
-                    if isinstance(results_list, list):
-                        for item in results_list:
-                            if isinstance(item, dict):
-                                _add_entity(item)
-                        return
-
-                    name = data.get("name", data.get("entity_name", ""))
-                    kind = data.get("kind", data.get("type", "Entity"))
-                    sid = data.get("symbol_id", name)
-
-                    if name and sid not in seen_nodes:
-                        seen_nodes.add(sid)
-                        color = LABEL_COLORS.get(kind, "#64748B")
-                        size = 25 if kind == "Class" else 18
-                        nodes.append(Node(
-                            id=sid, label=name, size=size, color=color,
-                            font={"color": "#E2E8F0"},
-                        ))
-
-                    # Handle relationships
-                    for rel_key in ("bases", "inherits_from", "depends_on",
-                                    "calls", "imports"):
-                        rels = data.get(rel_key, [])
-                        if isinstance(rels, list):
-                            for rel in rels:
-                                rel_name = rel if isinstance(rel, str) else rel.get("name", "")
-                                if rel_name:
-                                    rel_sid = f"{prefix}:{rel_name}"
-                                    if rel_sid not in seen_nodes:
-                                        seen_nodes.add(rel_sid)
-                                        nodes.append(Node(
-                                            id=rel_sid, label=rel_name,
-                                            size=18, color="#475569",
-                                            font={"color": "#94A3B8"},
-                                        ))
-                                    edges.append(Edge(
-                                        source=sid, target=rel_sid,
-                                        label=rel_key, color="#475569",
-                                    ))
-
-            for key, value in graph_data.items():
-                if isinstance(value, dict):
-                    _add_entity(value, prefix=key)
-                elif isinstance(value, list):
-                    for v in value:
-                        _add_entity(v, prefix=key)
-
+            nodes, edges = _build_graph(graph_data)
             if nodes:
                 st.markdown(f"**{len(nodes)} nodes, {len(edges)} edges**")
                 config = Config(
@@ -561,8 +626,7 @@ with panel_col:
                 )
                 agraph(nodes=nodes, edges=edges, config=config)
             else:
-                st.info("Graph query returned results but no visual relationships to display.")
-                st.json(graph_data)
+                st.info("Graph query returned results but no relationships to visualize yet.")
 
 
 # ---------------------------------------------------------------------------

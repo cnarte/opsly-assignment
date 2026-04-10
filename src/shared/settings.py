@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     MEMORY_PORT: int = 8014
     GATEWAY_PORT: int = 8000
 
+    # MCP client behaviour
+    MCP_CALL_TIMEOUT_S: int = 120
+    MCP_CALL_RETRIES: int = 1
+
     # General
     LOG_LEVEL: str = "INFO"
     ENVIRONMENT: str = "development"

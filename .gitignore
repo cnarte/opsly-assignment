@@ -12,3 +12,5 @@ build/
 htmlcov/
 *json
 *.md
+video/node_modules/
+.DS_Store

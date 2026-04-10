@@ -12,13 +12,14 @@ async def build_impact_graph(
     client: Neo4jClient,
     symbol_name: str,
     depth: int = 2,
+    repo_id: str = "",
 ) -> dict[str, Any]:
     """BFS from a symbol, collecting dependents at each depth level.
 
     Returns a dict with ``symbol``, ``depth``, and ``levels`` (a list of
     lists, one per depth level).
     """
-    query = queries.impact_at_depth(symbol_name, depth)
+    query = queries.impact_at_depth(symbol_name, depth, repo_id)
     records = await client.execute_query(query.cypher, query.parameters)
 
     levels: dict[int, list[dict[str, Any]]] = {}
@@ -38,9 +39,10 @@ async def build_impact_graph(
 async def build_context_view(
     client: Neo4jClient,
     symbol_name: str,
+    repo_id: str = "",
 ) -> dict[str, Any]:
     """Collect all direct relationships for a symbol (360-degree view)."""
-    query = queries.get_symbol_context(symbol_name)
+    query = queries.get_symbol_context(symbol_name, repo_id)
     records = await client.execute_query(query.cypher, query.parameters)
 
     outgoing: list[dict[str, Any]] = []
