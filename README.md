@@ -369,16 +369,6 @@ Coverage gate: `--cov-fail-under=70` (currently ~71%).
 
 ---
 
-## Known Limitations
-
-- **No incremental re-indexing.** Full re-index duplicates data. Clear the graph (`MATCH (n) DETACH DELETE n` in Neo4j Browser) before re-indexing the same repo.
-- **Free-tier LLM flakiness.** OpenRouter free models return provider errors on ~10% of calls. Retry logic (`MCP_CALL_RETRIES`) mitigates this, but a paid model is recommended for reliable production use.
-- **Single-repo scope.** Designed for one repository at a time. Multi-repo support requires namespace isolation in the graph schema.
-- **No authentication.** The gateway has no auth layer. Add API key or OAuth2 middleware before exposing publicly.
-- **No POST /api/chat streaming.** Responses are returned in full after the complete pipeline runs. The WebSocket endpoint (`/ws/chat`) provides a streaming experience. Server-Sent Events on the REST endpoint is a planned improvement.
-- **`compare_implementations` latency.** This tool chains three sequential LLM calls (fetch A, fetch B, compare). Expect 60–180s for this query type; the orchestrator container is configured with `MCP_CALL_TIMEOUT_S=240` to accommodate this.
-
----
 
 ## Future Improvements
 
