@@ -184,6 +184,30 @@ async def check_cache(state: OrchestratorState) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+_LIFECYCLE_KEYWORDS = frozenset({
+    "lifecycle", "life cycle", "life-cycle", "request flow", "request lifecycle",
+    "how does", "360", "symbol context", "what calls", "who calls",
+    "full flow", "end to end", "end-to-end",
+})
+
+_ENTITY_HINTS = ["fastapi", "apirouter", "request", "response", "starlette"]
+
+
+def _fast_entity_extract(query: str) -> str:
+    """Pull the most likely entity name from a query without an LLM call."""
+    q = query.lower()
+    for hint in _ENTITY_HINTS:
+        if hint in q:
+            # Return capitalised form from original query if possible
+            import re
+            m = re.search(re.escape(hint), query, re.IGNORECASE)
+            return m.group(0) if m else hint.capitalize()
+    # Fallback: first capitalised word
+    import re
+    words = re.findall(r"[A-Z][a-zA-Z0-9_]+", query)
+    return words[0] if words else "FastAPI"
+
+
 async def classify_query(state: OrchestratorState) -> dict[str, Any]:
     """Use the LLM to classify the user query by intent, entities, and tool plan."""
 
@@ -196,6 +220,25 @@ async def classify_query(state: OrchestratorState) -> dict[str, Any]:
                 "complexity": "simple",
             },
             "tool_plan": [],
+        }
+
+    # Fast-path: skip the LLM classifier entirely for lifecycle/flow queries.
+    # These queries reliably need get_symbol_context, and the classifier LLM
+    # call wastes ~30-60s we can't afford with a free model.
+    q_lower = query.lower()
+    if any(kw in q_lower for kw in _LIFECYCLE_KEYWORDS):
+        primary = _fast_entity_extract(query)
+        logger.info("Fast-path lifecycle: get_symbol_context(%s), skipping classifier LLM", primary)
+        return {
+            "query_classification": {
+                "intent": "relationship_query",
+                "entities": [primary],
+                "complexity": "medium",
+            },
+            "tool_plan": [
+                {"agent": "graph_query", "tool": "get_symbol_context",
+                 "args": {"symbol_name": primary}},
+            ],
         }
 
     llm = _get_llm()
@@ -227,25 +270,6 @@ async def classify_query(state: OrchestratorState) -> dict[str, Any]:
             and isinstance(args, dict)
         ):
             tool_plan.append({"agent": agent, "tool": tool, "args": args})
-
-    # Deterministic override: lifecycle / flow / context queries must use
-    # get_symbol_context — the LLM sometimes misclassifies these as
-    # code_explanation and picks find_entity, which produces huge payloads
-    # that overflow the synthesis context window.
-    _LIFECYCLE_KEYWORDS = {
-        "lifecycle", "life cycle", "life-cycle", "request flow", "request lifecycle",
-        "how does", "360", "symbol context", "what calls", "who calls",
-        "full flow", "end to end", "end-to-end",
-    }
-    q_lower = query.lower()
-    if any(kw in q_lower for kw in _LIFECYCLE_KEYWORDS):
-        primary = entities[0] if entities else "FastAPI"
-        tool_plan = [
-            {"agent": "graph_query", "tool": "get_symbol_context",
-             "args": {"symbol_name": primary}},
-        ]
-        intent = "relationship_query"
-        logger.info("Lifecycle/flow override: forcing get_symbol_context(%s)", primary)
 
     return {
         "query_classification": {
@@ -479,6 +503,75 @@ async def call_memory(state: OrchestratorState) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _summarise_agent_result(agent_name: str, result: dict) -> str:
+    """Convert an agent result dict into a compact, token-efficient summary."""
+    lines: list[str] = []
+
+    for tool_name, tool_result in result.items():
+        if not isinstance(tool_result, dict):
+            lines.append(f"{tool_name}: {str(tool_result)[:200]}")
+            continue
+
+        if "error" in tool_result:
+            lines.append(f"{tool_name}: error — {tool_result['error']}")
+            continue
+
+        # get_symbol_context → compact relationship summary
+        if "symbol" in tool_result and ("outgoing" in tool_result or "incoming" in tool_result):
+            symbol = tool_result["symbol"]
+            out = tool_result.get("outgoing", [])
+            inc = tool_result.get("incoming", [])
+            out_str = ", ".join(
+                f"{r.get('related_name','')} ({r.get('relationship') or r.get('rel','')})"
+                for r in out[:10]
+            )
+            inc_str = ", ".join(
+                f"{r.get('related_name','')} ({r.get('relationship') or r.get('rel','')})"
+                for r in inc[:15]
+            )
+            lines.append(
+                f"{tool_name}: symbol={symbol}\n"
+                f"  outgoing ({len(out)}): {out_str or 'none'}\n"
+                f"  incoming ({len(inc)} total, showing 15): {inc_str or 'none'}"
+            )
+            continue
+
+        # find_entity / find_related → list names only
+        if "results" in tool_result:
+            results = tool_result["results"]
+            entity = tool_result.get("entity", "")
+            rel = tool_result.get("relationship", "")
+            names = []
+            for r in results[:20]:
+                name = (r.get("n") or r.get("node") or r.get("source") or r.get("target") or {})
+                if isinstance(name, dict):
+                    name = name.get("name", "?")
+                names.append(str(name))
+            header = f"{tool_name}"
+            if entity:
+                header += f" entity={entity}"
+            if rel:
+                header += f" rel={rel}"
+            lines.append(f"{header}: {len(results)} results — {', '.join(names)}")
+            continue
+
+        # get_dependencies / get_dependents
+        if "dependencies" in tool_result or "dependents" in tool_result:
+            items = tool_result.get("dependencies") or tool_result.get("dependents") or []
+            names = [i.get("name", str(i)) for i in items[:20]]
+            key = "dependencies" if "dependencies" in tool_result else "dependents"
+            lines.append(f"{tool_name} {key} ({len(items)}): {', '.join(names)}")
+            continue
+
+        # code_analyst tools — keep snippet or explanation, capped at 600 chars
+        raw = json.dumps(tool_result, default=str)
+        if len(raw) > 600:
+            raw = raw[:600] + "…"
+        lines.append(f"{tool_name}: {raw}")
+
+    return "\n".join(lines) if lines else json.dumps(result, default=str)[:800]
+
+
 async def synthesize(state: OrchestratorState) -> dict[str, Any]:
     """Use the LLM to combine all agent results into a final response."""
 
@@ -488,12 +581,9 @@ async def synthesize(state: OrchestratorState) -> dict[str, Any]:
     parts: list[str] = []
     for agent_name, result in agent_results.items():
         if agent_name == "memory":
-            continue  # memory context added separately; skip from agent dump
-        raw = json.dumps(result, default=str)
-        # Cap each agent block to 1 500 chars — free model has a small context window
-        if len(raw) > 1500:
-            raw = raw[:1500] + " … [truncated]"
-        parts.append(f"--- {agent_name} ---\n{raw}")
+            continue
+        summary = _summarise_agent_result(agent_name, result)
+        parts.append(f"--- {agent_name} ---\n{summary}")
     agent_summary = "\n\n".join(parts) if parts else "(no agent results)"
 
     # Include at most last 2 conversation turns, capped at 400 chars each

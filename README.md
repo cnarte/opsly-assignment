@@ -2,6 +2,14 @@
 
 A production-ready multi-agent system that answers questions about the FastAPI codebase using real data from a knowledge graph. Built on the Model Context Protocol (MCP) with five specialised agents coordinated by a LangGraph orchestrator and exposed via a FastAPI gateway.
 
+## Demo
+
+<video src="docs/demo.mp4" controls width="100%" poster="docs/demo-preview.png">
+  <a href="docs/demo.mp4">Watch the demo walkthrough (MP4, ~8 MB)</a>
+</video>
+
+> Can't see the video? [Download docs/demo.mp4](docs/demo.mp4) or watch it locally.
+
 ## Architecture Overview
 
 ```
