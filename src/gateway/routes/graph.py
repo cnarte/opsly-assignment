@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import APIRouter
@@ -9,6 +10,7 @@ from fastapi import APIRouter
 from src.shared.schemas import GraphStats
 from src.shared.neo4j_client import Neo4jClient
 from src.shared.settings import Settings
+from src.gateway.mcp_client import call_agent_tool
 
 logger = logging.getLogger(__name__)
 settings = Settings()
@@ -71,3 +73,35 @@ async def graph_statistics() -> GraphStats:
         return GraphStats(nodes=0, relationships=0, labels={})
     finally:
         await client.close()
+
+
+@router.get("/api/graph/repos")
+async def list_repos() -> dict:
+    """Return all repos indexed in LadybugDB (via gitnexus-agent)."""
+    raw = await call_agent_tool(settings.GITNEXUS_PORT, "list_repos", {})
+
+    # raw is {"result": "<json-array>\n\n---\n..."}  or {"error": "..."}
+    if "error" in raw:
+        logger.error("list_repos tool error: %s", raw["error"])
+        return {"repos": []}
+
+    result_text: str = raw.get("result", "") or ""
+    # Extract the JSON array that appears before the optional "---" separator
+    text_before_separator = result_text.split("---")[0].strip()
+
+    repos: list[str] = []
+    try:
+        parsed = json.loads(text_before_separator)
+        if isinstance(parsed, list):
+            # Each item may be a string name or a dict with a "name" key
+            for item in parsed:
+                if isinstance(item, str):
+                    repos.append(item)
+                elif isinstance(item, dict):
+                    name = item.get("name") or item.get("repo") or item.get("id")
+                    if name:
+                        repos.append(str(name))
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("Could not parse list_repos result: %r", text_before_separator)
+
+    return {"repos": repos}

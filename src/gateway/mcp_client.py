@@ -25,6 +25,7 @@ _PORT_TO_SERVICE: dict[int, str] = {
     settings.GRAPH_QUERY_PORT: "graph-query",
     settings.CODE_ANALYST_PORT: "code-analyst",
     settings.MEMORY_PORT: "memory",
+    settings.GITNEXUS_PORT: "gitnexus-agent",
 }
 
 
