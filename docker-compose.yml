@@ -51,6 +51,7 @@ services:
       dockerfile: docker/Dockerfile.orchestrator
     ports:
       - "8010:8010"
+      - "8016:8016"
     depends_on:
       neo4j:
         condition: service_healthy

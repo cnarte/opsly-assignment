@@ -12,6 +12,9 @@ from fastapi.responses import StreamingResponse
 
 from src.shared.schemas import ChatRequest, ChatResponse
 from src.gateway.mcp_client import call_orchestrator_tool
+from src.shared.settings import Settings
+
+settings = Settings()
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,30 @@ async def chat(request: ChatRequest):
     repo_id = request.repo_id or ""
     model = request.model or ""
 
+    if request.stream:
+        import httpx
+        import os as _os
+
+        orch_host = "orchestrator" if _os.path.exists("/.dockerenv") else "localhost"
+        stream_url = f"http://{orch_host}:{settings.ORCHESTRATOR_STREAM_PORT}/stream"
+
+        async def _proxy_sse():
+            async with httpx.AsyncClient(timeout=300) as client:
+                async with client.stream(
+                    "POST", stream_url,
+                    json={
+                        "message": request.message,
+                        "session_id": session_id,
+                        "repo_id": repo_id,
+                        "model": model,
+                    }
+                ) as resp:
+                    async for line in resp.aiter_lines():
+                        if line:
+                            yield f"{line}\n\n"
+
+        return StreamingResponse(_proxy_sse(), media_type="text/event-stream")
+
     result = await call_orchestrator_tool(
         "route_to_agents",
         {"message": request.message, "session_id": session_id, "repo_id": repo_id, "model": model},
@@ -36,11 +63,6 @@ async def chat(request: ChatRequest):
     )
 
     if "error" in result and "final_response" not in result:
-        if request.stream:
-            async def _error_sse():
-                yield f"data: {json.dumps({'type': 'error', 'error': result['error']})}\n\n"
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
-            return StreamingResponse(_error_sse(), media_type="text/event-stream")
         return ChatResponse(
             response=f"Error: {result['error']}",
             session_id=session_id,
@@ -51,18 +73,6 @@ async def chat(request: ChatRequest):
     final_response = result.get("final_response", str(result))
     agent_results = result.get("agent_results", {})
     tool_plan = result.get("tool_plan", [])
-
-    if request.stream:
-        async def _sse():
-            yield (
-                f"data: {json.dumps({'type': 'metadata', 'session_id': session_id, 'agents_used': agents_used})}\n\n"
-            )
-            # Emit in 80-char chunks; asyncio.sleep(0) yields control between chunks
-            for i in range(0, len(final_response), 80):
-                yield f"data: {json.dumps({'type': 'chunk', 'content': final_response[i:i+80]})}\n\n"
-                await asyncio.sleep(0)
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-        return StreamingResponse(_sse(), media_type="text/event-stream")
 
     return ChatResponse(
         response=final_response,

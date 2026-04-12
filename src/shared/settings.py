@@ -38,6 +38,7 @@ class Settings(BaseSettings):
 
     # Service ports
     ORCHESTRATOR_PORT: int = 8010
+    ORCHESTRATOR_STREAM_PORT: int = 8016
     INDEXER_PORT: int = 8011
     GRAPH_QUERY_PORT: int = 8012
     CODE_ANALYST_PORT: int = 8013
