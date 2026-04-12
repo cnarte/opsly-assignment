@@ -49,6 +49,17 @@ LABEL_COLORS = {
     "Docstring": "#EC4899",
 }
 
+OPENROUTER_MODELS = [
+    ("Server default",                         ""),
+    ("Nemotron 3 Super 120B (free)",           "nvidia/nemotron-3-super-120b-a12b:free"),
+    ("Qwen 2.5 72B Instruct (free)",           "qwen/qwen-2.5-72b-instruct:free"),
+    ("Llama 3.3 70B Instruct (free)",          "meta-llama/llama-3.3-70b-instruct:free"),
+    ("DeepSeek Chat v3 (free)",                "deepseek/deepseek-chat:free"),
+    ("Gemini 2.0 Flash Exp (free)",            "google/gemini-2.0-flash-exp:free"),
+    ("Mistral 7B Instruct (free)",             "mistralai/mistral-7b-instruct:free"),
+    ("Other…",                                 "__custom__"),
+]
+
 
 # ---------------------------------------------------------------------------
 # API helpers
@@ -69,6 +80,15 @@ def api_post(path: str, data: dict, timeout: int = REQUEST_TIMEOUT) -> dict[str,
         return r.json()
     except Exception as e:
         return {"error": str(e)}
+
+
+def api_get_repos() -> list[str]:
+    """Fetch all indexed repos from /api/graph/repos."""
+    try:
+        data = api_get("/api/graph/repos")
+        return data.get("repos", [])
+    except Exception:
+        return []
 
 
 def _repo_id_from_url(url: str) -> str:
@@ -219,6 +239,10 @@ if "indexed_repos" not in st.session_state:
     st.session_state.indexed_repos = []
 if "active_repo_id" not in st.session_state:
     st.session_state.active_repo_id = ""
+if "selected_model" not in st.session_state:
+    st.session_state.selected_model = ""
+if "available_repos" not in st.session_state:
+    st.session_state.available_repos = []
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +314,29 @@ with st.sidebar:
 
     st.divider()
 
+    # -- Model selector --
+    st.markdown('<div class="section-header">LLM Model</div>', unsafe_allow_html=True)
+    model_labels = [label for label, _ in OPENROUTER_MODELS]
+    current_model_id = st.session_state.selected_model
+    current_idx = next(
+        (i for i, (_, mid) in enumerate(OPENROUTER_MODELS) if mid == current_model_id), 0
+    )
+    picked_label = st.selectbox("OpenRouter model", model_labels, index=current_idx, key="model_picker")
+    picked_id = dict(OPENROUTER_MODELS)[picked_label]
+    if picked_id == "__custom__":
+        picked_id = st.text_input(
+            "Custom model ID",
+            value=current_model_id if current_model_id not in ("", "__custom__") else "",
+            placeholder="org/model-name:tag",
+            key="custom_model_input",
+        )
+    st.session_state.selected_model = picked_id or ""
+    if st.session_state.selected_model:
+        st.caption(f"Active: `{st.session_state.selected_model}`")
+    else:
+        st.caption("Using server default")
+    st.divider()
+
     # -- Indexing controls --
     st.markdown('<div class="section-header">Repository Indexing</div>', unsafe_allow_html=True)
 
@@ -325,6 +372,9 @@ with st.sidebar:
             ) if st.session_state.active_repo_id in st.session_state.indexed_repos else 0,
             format_func=lambda x: "All repos" if x == "" else x,
         )
+
+    if st.button("🔄 Refresh repos", key="refresh_repos"):
+        st.session_state.available_repos = api_get_repos()
 
     # Index status polling
     if st.session_state.indexing_job:
@@ -411,24 +461,75 @@ with chat_col:
         st.session_state.agent_activities.insert(0, activity)
 
         with chat_container:
-            with st.chat_message("assistant"):
-                with st.spinner("🔄 Agents are analyzing your query..."):
-                    result = api_post(
-                        "/api/chat",
-                        {
-                            "message": prompt,
-                            "session_id": st.session_state.session_id,
-                            "repo_id": st.session_state.active_repo_id,
-                        },
-                    )
+            import json as _json
+            import os as _os
 
-                response = result.get("response", result.get("error", "No response"))
+            payload = {
+                "message": prompt,
+                "session_id": st.session_state.session_id,
+                "repo_id": st.session_state.active_repo_id,
+                "stream": True,
+                "model": st.session_state.selected_model or None,
+            }
+
+            gateway_url = _os.getenv("GATEWAY_URL", "http://localhost:8000")
+
+            with st.chat_message("assistant"):
+                msg_placeholder = st.empty()
+                tool_placeholder = st.empty()
+                accumulated = ""
+                active_tools: list[str] = []
+
+                try:
+                    with httpx.stream(
+                        "POST",
+                        f"{gateway_url}/api/chat",
+                        json=payload,
+                        timeout=300,
+                    ) as resp:
+                        for raw_line in resp.iter_lines():
+                            if not raw_line:
+                                continue
+                            line = raw_line.strip()
+                            if not line.startswith("data:"):
+                                continue
+                            try:
+                                event = _json.loads(line[5:].strip())
+                            except _json.JSONDecodeError:
+                                continue
+
+                            etype = event.get("type", "")
+                            if etype == "token":
+                                accumulated += event.get("content", "")
+                                msg_placeholder.markdown(accumulated + "▌")
+                            elif etype == "tool_call":
+                                tool_name = event.get("tool", "")
+                                active_tools.append(tool_name)
+                                tool_placeholder.caption(
+                                    " · ".join(f"🔧 {t}" for t in active_tools[-3:])
+                                )
+                            elif etype == "tool_result":
+                                pass
+                            elif etype == "done":
+                                break
+                            elif etype == "error":
+                                accumulated = f"Error: {event.get('error', 'unknown')}"
+                                break
+
+                    msg_placeholder.markdown(accumulated)
+                    tool_placeholder.empty()
+                    result = {"response": accumulated, "session_id": st.session_state.session_id}
+
+                except Exception as exc:
+                    accumulated = f"Connection error: {exc}"
+                    msg_placeholder.markdown(accumulated)
+                    result = {"response": accumulated}
+
+                response = accumulated
                 agents_used = result.get("agents_used", [])
                 st.session_state.session_id = result.get(
                     "session_id", st.session_state.session_id
                 )
-
-                st.markdown(response)
 
                 if agents_used:
                     badges_html = ""
