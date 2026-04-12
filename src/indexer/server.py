@@ -1,150 +1,157 @@
-"""Indexer Agent MCP server — parses repositories and populates a Neo4j knowledge graph."""
-
+"""Indexer Agent MCP server — delegates to gitnexus-agent for indexing."""
 from __future__ import annotations
 
-import hashlib
+import asyncio
+import json
 import logging
-import subprocess
-import tempfile
+import os
 import uuid
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.client.streamable_http import streamablehttp_client
+from mcp import ClientSession
 
-from src.indexer.ast_parser import ASTParser
-from src.indexer.neo4j_writer import Neo4jWriter
-from src.indexer.pipeline import IndexingPipeline
-from src.shared.exceptions import IndexingError
-from src.shared.neo4j_client import Neo4jClient
 from src.shared.settings import Settings
 
 logger = logging.getLogger(__name__)
-
 settings = Settings()
 
-mcp = FastMCP(
-    "indexer-agent",
-    host="0.0.0.0",
-    port=settings.INDEXER_PORT,
-)
+mcp = FastMCP("indexer-agent", host="0.0.0.0", port=settings.INDEXER_PORT)
 
-# In-memory job tracking (lightweight; swap for Redis in production)
+# In-memory job tracking
 _jobs: dict[str, dict[str, Any]] = {}
 
-
-# -- helpers ----------------------------------------------------------------
-
-def _get_neo4j_client() -> Neo4jClient:
-    return Neo4jClient(settings)
+WORKSPACE = Path(os.getenv("WORKSPACE_PATH", "/workspace/repos"))
 
 
-# -- tools ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+async def _clone_repo(repo_url: str, ref: str, dest: Path) -> str:
+    """Clone `repo_url` into `dest` and return the commit SHA."""
+    cmd = ["git", "clone", "--depth", "1"]
+    if ref:
+        cmd += ["--branch", ref]
+    cmd += [repo_url, str(dest)]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"git clone failed: {stderr.decode().strip()}")
+    sha_proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(dest), "rev-parse", "HEAD",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    sha_out, _ = await sha_proc.communicate()
+    return sha_out.decode().strip() if sha_proc.returncode == 0 else ""
+
+
+async def _call_gitnexus(path: str, repo_name: str) -> dict:
+    """Call gitnexus-agent.analyze_repo via HTTP MCP."""
+    host = "gitnexus-agent" if os.path.exists("/.dockerenv") else "localhost"
+    url = f"http://{host}:{settings.GITNEXUS_PORT}/mcp"
+
+    async with streamablehttp_client(url) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool(
+                "analyze_repo", {"path": path, "repo_name": repo_name}
+            )
+            if result.content:
+                return json.loads(result.content[0].text)
+            return {}
+
+
+# ---------------------------------------------------------------------------
+# MCP tools (assignment-required names)
+# ---------------------------------------------------------------------------
 
 
 @mcp.tool()
-async def index_repository(repo_url: str, ref: str = "") -> dict:
-    """Full repository indexing - clone repo and run 6-pass pipeline.
+async def index_repository(repo_url: str, ref: str = "", repo_name: str = "") -> dict:
+    """Clone a repository and index it with GitNexus.
 
-    Returns immediately with a job_id. Use get_index_status to poll progress.
+    Returns immediately with a job_id. Poll get_index_status for progress.
     """
-    import asyncio
-
     job_id = str(uuid.uuid4())
-    _jobs[job_id] = {"status": "running", "repo_url": repo_url, "ref": ref}
+    name = repo_name or repo_url.rstrip("/").split("/")[-1].removesuffix(".git")
+    _jobs[job_id] = {"status": "started", "repo_url": repo_url, "repo_name": name}
 
-    async def _run_indexing() -> None:
+    async def _run() -> None:
         try:
-            # Clone to temp directory
-            tmp_dir = tempfile.mkdtemp(prefix="indexer_")
-            clone_cmd = ["git", "clone", "--depth", "1"]
-            if ref:
-                clone_cmd += ["--branch", ref]
-            clone_cmd += [repo_url, tmp_dir]
-
+            dest = WORKSPACE / name
+            dest.mkdir(parents=True, exist_ok=True)
             _jobs[job_id]["status"] = "cloning"
-            proc = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=300)
-            if proc.returncode != 0:
-                raise IndexingError(f"git clone failed: {proc.stderr.strip()}")
-
-            # Determine commit SHA
-            sha_proc = subprocess.run(
-                ["git", "-C", tmp_dir, "rev-parse", "HEAD"],
-                capture_output=True, text=True,
-            )
-            commit_sha = sha_proc.stdout.strip() if sha_proc.returncode == 0 else ""
-
-            # Run pipeline
-            _jobs[job_id]["status"] = "indexing"
-            client = _get_neo4j_client()
-            async with client:
-                writer = Neo4jWriter(client)
-                pipeline = IndexingPipeline(writer)
-                result = await pipeline.run(tmp_dir, repo_url=repo_url, commit_sha=commit_sha)
-
-            _jobs[job_id] = {"status": "completed", **result}
-            logger.info("Indexing job %s completed: %s", job_id, result)
-
+            commit_sha = await _clone_repo(repo_url, ref, dest)
+            _jobs[job_id].update({"status": "indexing", "commit_sha": commit_sha})
+            result = await _call_gitnexus(str(dest), name)
+            _jobs[job_id].update({"status": "completed", **result})
+            logger.info("Job %s completed: %s", job_id, result)
         except Exception as exc:
-            logger.error("Indexing job %s failed: %s", job_id, exc)
+            logger.error("Job %s failed: %s", job_id, exc)
             _jobs[job_id] = {"status": "failed", "error": str(exc)}
 
-    # Launch background task and return immediately
-    asyncio.create_task(_run_indexing())
+    asyncio.create_task(_run())
     return {"job_id": job_id, "status": "started"}
 
 
 @mcp.tool()
 async def index_file(repo_path: str, file_path: str) -> dict:
-    """Single file indexing."""
+    """Parse a single Python file and return its entities (no graph write)."""
+    import ast as _ast
+
     full = Path(repo_path) / file_path
     if not full.exists():
-        raise IndexingError(f"File not found: {full}")
-
+        return {"error": f"File not found: {full}"}
     source = full.read_text(encoding="utf-8", errors="replace")
-    parser = ASTParser(repo_id="local")
-    result = parser.parse(source, file_path=file_path)
-    return result
+    try:
+        tree = _ast.parse(source, filename=file_path)
+    except SyntaxError as exc:
+        return {"error": f"SyntaxError: {exc}"}
+    classes = [n.name for n in _ast.walk(tree) if isinstance(n, _ast.ClassDef)]
+    functions = [n.name for n in _ast.walk(tree) if isinstance(n, _ast.FunctionDef | _ast.AsyncFunctionDef)]
+    return {"file_path": file_path, "classes": classes, "functions": functions}
 
 
 @mcp.tool()
 async def parse_python_ast(source_code: str, file_path: str = "") -> dict:
-    """Extract AST from Python source code."""
-    parser = ASTParser(repo_id="")
-    return parser.parse(source_code, file_path=file_path)
+    """Extract AST summary from Python source code."""
+    import ast as _ast
+
+    try:
+        tree = _ast.parse(source_code, filename=file_path or "<string>")
+    except SyntaxError as exc:
+        return {"error": f"SyntaxError: {exc}"}
+    classes = [n.name for n in _ast.walk(tree) if isinstance(n, _ast.ClassDef)]
+    functions = [n.name for n in _ast.walk(tree) if isinstance(n, _ast.FunctionDef | _ast.AsyncFunctionDef)]
+    imports = [
+        _ast.unparse(n) for n in _ast.walk(tree)
+        if isinstance(n, _ast.Import | _ast.ImportFrom)
+    ]
+    return {"file_path": file_path, "classes": classes, "functions": functions, "imports": imports}
 
 
 @mcp.tool()
 async def extract_entities(source_code: str, file_path: str = "") -> dict:
-    """Identify code entities and relationships from source."""
-    parser = ASTParser(repo_id="analysis")
-    result = parser.parse(source_code, file_path=file_path)
-    # Flatten into a summary
-    entities: list[dict[str, Any]] = []
-    for cls in result.get("classes", []):
-        entities.append({
-            "kind": "class",
-            "name": cls["name"],
-            "symbol_id": cls["symbol_id"],
-            "bases": cls.get("bases", []),
-            "start_line": cls["start_line"],
-            "end_line": cls["end_line"],
-        })
-    for fn in result.get("functions", []):
-        entities.append({
-            "kind": fn["kind"],
-            "name": fn["name"],
-            "symbol_id": fn["symbol_id"],
-            "args": [a["name"] for a in fn.get("args", [])],
-            "start_line": fn["start_line"],
-            "end_line": fn["end_line"],
-        })
+    """Identify code entities from source code."""
+    parsed = await parse_python_ast(source_code, file_path)
+    if "error" in parsed:
+        return parsed
+    entities = (
+        [{"kind": "class", "name": n} for n in parsed["classes"]]
+        + [{"kind": "function", "name": n} for n in parsed["functions"]]
+    )
     return {"file_path": file_path, "entity_count": len(entities), "entities": entities}
 
 
 @mcp.tool()
 async def get_index_status(job_id: str = "") -> dict:
-    """Report indexing progress and statistics."""
+    """Return status of an indexing job, or all jobs if job_id is empty."""
     if job_id:
         job = _jobs.get(job_id)
         if not job:
@@ -153,7 +160,9 @@ async def get_index_status(job_id: str = "") -> dict:
     return {"total_jobs": len(_jobs), "jobs": _jobs}
 
 
-# -- main -------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
