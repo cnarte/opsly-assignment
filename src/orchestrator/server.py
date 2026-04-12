@@ -12,6 +12,7 @@ import json as _json
 from langchain_core.messages import HumanMessage
 from mcp.server.fastmcp import FastMCP
 
+from langgraph.errors import GraphRecursionError
 from src.orchestrator.graph import build_orchestrator_graph
 from src.orchestrator.nodes import _get_llm, _call_mcp_agent
 from src.orchestrator.prompts import RESPONSE_SYNTHESIS_PROMPT
@@ -40,7 +41,7 @@ async def stream_chat(body: dict):
 
     async def _event_generator():
         try:
-            async for event in _graph.astream_events(state, version="v2"):
+            async for event in _graph.astream_events(state, config={"recursion_limit": 50}, version="v2"):
                 kind = event.get("event", "")
                 data = None
 
@@ -68,6 +69,12 @@ async def stream_chat(body: dict):
                     yield f"data: {_json.dumps(data)}\n\n"
 
             yield f"data: {_json.dumps({'type': 'done'})}\n\n"
+        except GraphRecursionError:
+            partial = _collect_partial_results(state["messages"])
+            summary = await _synthesize_partial(partial, message, model)
+            full = summary + "\n\n*(Based on partial exploration — ask a narrower question for more detail.)*"
+            yield f"data: {_json.dumps({'type': 'partial', 'content': full})}\n\n"
+            yield f"data: {_json.dumps({'type': 'done'})}\n\n"
         except Exception as exc:
             yield f"data: {_json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
 
@@ -92,6 +99,34 @@ def _initial_state(message: str, session_id: str, repo_id: str, model: str) -> O
     }
 
 
+def _collect_partial_results(messages: list) -> str:
+    """Extract ToolMessage content from a message list and join as a single string."""
+    from langchain_core.messages import ToolMessage
+    parts = [m.content for m in messages if isinstance(m, ToolMessage) and m.content]
+    return "\n\n".join(parts)
+
+
+async def _synthesize_partial(partial_content: str, query: str, model: str = "") -> str:
+    """Ask the LLM to synthesise whatever partial tool results were collected."""
+    from langchain_core.messages import SystemMessage, HumanMessage as _HM
+    llm = _get_llm(model)
+    prompt = (
+        "You are summarising partial research results. The following tool results were "
+        "collected before exploration was cut short. Synthesise the best answer you can "
+        "to the user's query from this data:\n\n"
+        f"{partial_content[:8000]}"
+    )
+    try:
+        response = await llm.ainvoke([
+            SystemMessage(content=prompt),
+            _HM(content=f"Query: {query}"),
+        ])
+        return response.content
+    except Exception as exc:
+        logger.warning("Partial synthesis failed: %s", exc)
+        return partial_content[:2000]
+
+
 @mcp.tool()
 async def route_to_agents(
     message: str,
@@ -102,7 +137,17 @@ async def route_to_agents(
     """Run the full ReAct pipeline and return the final response."""
     state = _initial_state(message, session_id, repo_id, model)
     try:
-        final_state = await _graph.ainvoke(state)
+        final_state = await _graph.ainvoke(state, config={"recursion_limit": 50})
+    except GraphRecursionError:
+        logger.warning("Recursion limit reached for query: %s", message[:100])
+        partial = _collect_partial_results(state["messages"])
+        summary = await _synthesize_partial(partial, message, model)
+        return {
+            "final_response": summary + "\n\n*(Based on partial exploration — ask a narrower question for more detail.)*",
+            "session_id": session_id,
+            "agent_results": {},
+            "tool_plan": [],
+        }
     except Exception as exc:
         logger.error("Orchestrator pipeline failed: %s", exc)
         return {"error": str(exc), "final_response": f"Pipeline error: {exc}"}

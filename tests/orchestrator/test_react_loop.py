@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 
 @pytest.mark.asyncio
@@ -74,3 +74,46 @@ def test_get_llm_uses_settings_default_when_empty():
         _get_llm("")
         call_kwargs = mock_cls.call_args[1]
         assert call_kwargs["model"] == settings.OPENROUTER_MODEL
+
+
+def test_collect_partial_results_extracts_tool_messages():
+    """_collect_partial_results should join ToolMessage content strings."""
+    from src.orchestrator.server import _collect_partial_results
+
+    msgs = [
+        HumanMessage(content="how does routing work?"),
+        AIMessage(content="", tool_calls=[{"id": "t1", "name": "get_symbol_context", "args": {}}]),
+        ToolMessage(content='{"symbol": "APIRouter", "outgoing": []}', tool_call_id="t1"),
+        AIMessage(content="", tool_calls=[{"id": "t2", "name": "find_entity", "args": {}}]),
+        ToolMessage(content='{"results": [{"name": "add_api_route"}]}', tool_call_id="t2"),
+    ]
+    result = _collect_partial_results(msgs)
+    assert '{"symbol": "APIRouter"' in result
+    assert '{"results":' in result
+
+
+def test_collect_partial_results_empty():
+    """_collect_partial_results on a message list with no ToolMessages returns empty string."""
+    from src.orchestrator.server import _collect_partial_results
+
+    msgs = [HumanMessage(content="hi")]
+    assert _collect_partial_results(msgs) == ""
+
+
+@pytest.mark.asyncio
+async def test_route_to_agents_handles_recursion_error():
+    """route_to_agents should return a partial answer when GraphRecursionError is raised."""
+    from langgraph.errors import GraphRecursionError
+
+    with patch("src.orchestrator.server._graph") as mock_graph, \
+         patch("src.orchestrator.server._synthesize_partial", AsyncMock(return_value="Partial answer")) as mock_synth:
+
+        mock_graph.ainvoke = AsyncMock(side_effect=GraphRecursionError("limit reached"))
+
+        # Import after patching so the module-level _graph is replaced
+        from src.orchestrator import server as srv
+        result = await srv.route_to_agents("how does routing work?", session_id="s1")
+
+    assert "Partial answer" in result["final_response"]
+    assert "partial exploration" in result["final_response"].lower()
+    mock_synth.assert_awaited_once()
