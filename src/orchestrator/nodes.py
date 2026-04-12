@@ -31,6 +31,30 @@ def _get_llm(model: str = "") -> ChatOpenRouter:
     )
 
 
+async def _compress_tool_result(result: str, tool_name: str = "", max_chars: int = 3000) -> str:
+    """LLM-summarise tool results that are too large for the agent context window.
+
+    Results under max_chars pass through unchanged (no LLM call, no latency).
+    On LLM failure, falls back to the first max_chars characters of the raw result.
+    """
+    if len(result) <= max_chars:
+        return result
+
+    prompt = (
+        f"The following is the raw output of the '{tool_name}' tool. "
+        "Summarise it concisely so the key information is preserved in under 500 words. "
+        "Preserve file paths, counts, and names. Do not add commentary.\n\n"
+        f"{result[:12000]}"
+    )
+    try:
+        llm = _get_llm()
+        response = await llm.ainvoke([SystemMessage(content=prompt), HumanMessage(content="Summarise the above.")])
+        return response.content
+    except Exception as exc:
+        logger.warning("Tool result compression failed for %s: %s", tool_name, exc)
+        return result[:max_chars]
+
+
 # ---------------------------------------------------------------------------
 # MCP call helper
 # ---------------------------------------------------------------------------
@@ -100,7 +124,8 @@ def _make_mcp_tool(agent: str, port: int, name: str, description: str, schema: d
 
     async def _run(**kwargs: Any) -> str:
         result = await _call_mcp_agent(agent, port, name, {k: v for k, v in kwargs.items() if v not in (None, "")})
-        return json.dumps(result, default=str)
+        raw = json.dumps(result, default=str)
+        return await _compress_tool_result(raw, tool_name=name)
 
     return StructuredTool(
         name=name,

@@ -129,3 +129,49 @@ async def test_route_to_agents_handles_recursion_error():
     # Verify the ToolMessage content was passed to synthesize
     call_args = mock_synth.call_args[0]
     assert '{"symbol": "APIRouter"}' in call_args[0]
+
+
+@pytest.mark.asyncio
+async def test_compress_tool_result_short_passthrough():
+    """Results under max_chars should pass through unchanged — no LLM call."""
+    from src.orchestrator.nodes import _compress_tool_result
+
+    with patch("src.orchestrator.nodes._get_llm") as mock_llm:
+        short = '{"name": "FastAPI"}'
+        result = await _compress_tool_result(short, tool_name="find_entity")
+        mock_llm.assert_not_called()
+        assert result == short
+
+
+@pytest.mark.asyncio
+async def test_compress_tool_result_large_calls_llm():
+    """Results over max_chars should be summarised via LLM."""
+    from src.orchestrator.nodes import _compress_tool_result
+
+    mock_response = MagicMock()
+    mock_response.content = "Summary: 4406 functions across fastapi/, tests/, docs/."
+    mock_llm_instance = MagicMock()
+    mock_llm_instance.ainvoke = AsyncMock(return_value=mock_response)
+
+    with patch("src.orchestrator.nodes._get_llm", return_value=mock_llm_instance):
+        large = '{"entities": [' + ', '.join([f'"func_{i}"' for i in range(500)]) + ']}'
+        result = await _compress_tool_result(large, tool_name="list_entities", max_chars=100)
+
+    assert "Summary" in result
+    mock_llm_instance.ainvoke.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_compress_tool_result_llm_failure_falls_back():
+    """If the LLM call fails, fall back to the first max_chars chars of the raw result."""
+    from src.orchestrator.nodes import _compress_tool_result
+
+    mock_llm_instance = MagicMock()
+    mock_llm_instance.ainvoke = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
+
+    with patch("src.orchestrator.nodes._get_llm", return_value=mock_llm_instance):
+        large = "x" * 4000
+        result = await _compress_tool_result(large, tool_name="list_entities", max_chars=100)
+
+    assert result.startswith("x" * 100)
+    assert len(result) < 4000
