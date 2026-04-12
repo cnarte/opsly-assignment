@@ -27,10 +27,11 @@ async def chat(request: ChatRequest):
     """
     session_id = request.session_id or str(uuid.uuid4())
     repo_id = request.repo_id or ""
+    model = request.model or ""
 
     result = await call_orchestrator_tool(
         "route_to_agents",
-        {"message": request.message, "session_id": session_id, "repo_id": repo_id},
+        {"message": request.message, "session_id": session_id, "repo_id": repo_id, "model": model},
         timeout=300,
     )
 
@@ -87,9 +88,11 @@ async def ws_chat(websocket: WebSocket) -> None:
                 message = payload.get("message", data)
                 session_id = payload.get("session_id", session_id)
                 repo_id = payload.get("repo_id", "")
+                model = payload.get("model", "")
             except (json.JSONDecodeError, TypeError):
                 message = data
                 repo_id = ""
+                model = ""
 
             # Send acknowledgement
             await websocket.send_json(
@@ -98,7 +101,7 @@ async def ws_chat(websocket: WebSocket) -> None:
 
             result = await call_orchestrator_tool(
                 "route_to_agents",
-                {"message": message, "session_id": session_id, "repo_id": repo_id},
+                {"message": message, "session_id": session_id, "repo_id": repo_id, "model": model},
             )
 
             agents_used = result.get("agent_plan", [])

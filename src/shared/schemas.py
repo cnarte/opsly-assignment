@@ -12,6 +12,7 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     stream: bool = False
     repo_id: str | None = None
+    model: str | None = None
 
 
 class ChatResponse(BaseModel):
