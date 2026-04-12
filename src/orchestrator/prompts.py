@@ -23,6 +23,18 @@ graph_query agent tools:
       -- BEST tool for lifecycle/flow questions; returns outgoing + incoming relationships
   analyze_impact(symbol_name, depth=2)
       -- blast-radius: what would break if this symbol changed; returns affected nodes by depth
+  list_entities(entity_type, limit=50, path_prefix="", exclude_paths=[])
+      -- list all entities of a given type: Function, Class, Method, Module, File
+      -- use when user asks "get/list/show all functions/classes/methods/modules"
+      -- path_prefix: only include entities from this directory (e.g., "fastapi/")
+      -- exclude_paths: exclude certain directories (e.g., ["tests", "docs_src"])
+      -- returns name, file_path, start_line, end_line for each entity
+  semantic_search(query, entity_type="Function", limit=20, path_prefix="", exclude_paths=[])
+      -- semantic search using embeddings for natural language queries
+      -- searches on docstrings and function signatures
+      -- use when exact entity name is unknown but you know what it does
+      -- examples: "functions that handle authentication", "error handling code"
+      -- path_prefix & exclude_paths work like list_entities
   execute_query(cypher)
       -- run arbitrary Cypher against the Neo4j knowledge graph (advanced)
 
@@ -39,6 +51,81 @@ code_analyst agent tools:
       -- detect design patterns (Decorator, Factory, DI, Observer, etc.) in a module/entity
   compare_implementations(entity_a, entity_b)
       -- LLM comparison of two code entities side-by-side
+"""
+
+# ---------------------------------------------------------------------------
+# Query rewriting for semantic search and path filtering
+# ---------------------------------------------------------------------------
+
+QUERY_REWRITE_PROMPT = """\
+You are rewriting user code search queries into a structured format that will be
+passed to semantic and structured search tools.
+
+Given a user's natural language search query about code, produce a JSON object
+with the following structure:
+
+{
+  "search_type": "exact|semantic|list|combined",
+  "query": "search query string",
+  "entity_type": "Function|Class|Method|Module",
+  "path_prefix": "optional/directory/prefix",
+  "exclude_paths": ["optional", "excluded", "paths"],
+  "include_docs": false,
+  "reason": "brief explanation of the search strategy"
+}
+
+Search type decisions:
+- "exact": User knows the exact entity name (e.g. "find APIRouter")
+  Use list_entities or find_entity
+- "semantic": User describes what code does (e.g. "functions that handle auth")
+  Use semantic_search
+- "list": User wants to see all entities of a type (e.g. "show all functions")
+  Use list_entities with optional path filters
+- "combined": Use both semantic and exact search
+
+Path filtering rules:
+- "not from X" or "exclude X" → add to exclude_paths (e.g., "docs", "test")
+- "only from X" or "in X" or "from X" → set path_prefix (e.g., "fastapi/")
+- Common excludes: "docs_src", "tests", "examples", "test_" prefixed files
+
+Entity type rules:
+- Detect from keywords: "functions" → Function, "classes" → Class, "methods" → Method
+- Default: "Function" if not specified
+
+include_docs rules:
+- If user says "not from docs", "skip documentation", etc. → false
+- If user says "including docs", "from docstrings" → true
+- Default: false (exclude docs_src/)
+
+Examples:
+Input: "get me all functions not from docs"
+Output: {
+  "search_type": "list",
+  "query": "all functions",
+  "entity_type": "Function",
+  "exclude_paths": ["docs_src"],
+  "reason": "list all functions excluding documentation"
+}
+
+Input: "find functions that handle authentication"
+Output: {
+  "search_type": "semantic",
+  "query": "authentication login auth verify token",
+  "entity_type": "Function",
+  "exclude_paths": ["tests", "examples"],
+  "reason": "semantic search for auth-related functions excluding examples"
+}
+
+Input: "show all classes in fastapi/routing"
+Output: {
+  "search_type": "list",
+  "query": "all classes",
+  "entity_type": "Class",
+  "path_prefix": "fastapi/routing",
+  "reason": "list classes from specific module"
+}
+
+Respond ONLY with valid JSON -- no markdown fences, no commentary.
 """
 
 # ---------------------------------------------------------------------------
@@ -89,6 +176,22 @@ Guidelines for building tool_plan:
   "what calls X", "lifecycle", "flow", or "360 view". Do NOT add
   get_dependencies (already in get_symbol_context) or explain_implementation
   (too slow for these queries).
+- listing all entities (functions/classes/methods/modules): graph_query
+  list_entities(entity_type=<type>, limit=50). Use when the user asks to
+  "get all X", "list all X", "show me all X", "how many X are there".
+  Do NOT use find_entity or execute_query for this — list_entities is faster
+  and returns structured data with file paths and line numbers.
+  NOTE: list_entities now supports path_prefix and exclude_paths parameters!
+  If user specifies "not from docs" or "only from fastapi/", pass the
+  appropriate path filters.
+- semantic search (fuzzy/behavior-based): graph_query semantic_search when
+  the user describes what code does rather than naming a specific entity.
+  Examples: "functions that handle authentication", "error handling code",
+  "validation logic". semantic_search supports path_prefix and exclude_paths
+  just like list_entities.
+- impact/change analysis: graph_query analyze_impact for the target symbol.
+- If entities is empty, omit code_analyst tools that require entity_name.
+- Limit tool_plan to 2 entries for simple, 3-4 for medium, 5 for complex.
 - impact/change analysis: graph_query analyze_impact for the target symbol.
 - If entities is empty, omit code_analyst tools that require entity_name.
 - Limit tool_plan to 2 entries for simple, 3-4 for medium, 5 for complex.

@@ -209,6 +209,10 @@ if "agent_activities" not in st.session_state:
     st.session_state.agent_activities = []
 if "last_graph_data" not in st.session_state:
     st.session_state.last_graph_data = None
+if "graph_query_text" not in st.session_state:
+    st.session_state.graph_query_text = ""
+if "graph_is_current" not in st.session_state:
+    st.session_state.graph_is_current = True
 if "indexing_job" not in st.session_state:
     st.session_state.indexing_job = None
 if "indexed_repos" not in st.session_state:
@@ -349,6 +353,8 @@ with st.sidebar:
         st.session_state.session_id = str(uuid.uuid4())
         st.session_state.agent_activities = []
         st.session_state.last_graph_data = None
+        st.session_state.graph_query_text = ""
+        st.session_state.graph_is_current = True
         st.rerun()
 
 
@@ -448,10 +454,15 @@ with chat_col:
             "raw_result": result,
         })
 
-        # Check if graph data is present
+        # Check if graph data is present and track freshness
         agent_results = result.get("agent_results", {})
         if "graph_query" in agent_results:
             st.session_state.last_graph_data = agent_results["graph_query"]
+            st.session_state.graph_query_text = prompt
+            st.session_state.graph_is_current = True
+        else:
+            # Keep existing graph but mark as stale (from previous query)
+            st.session_state.graph_is_current = False
 
         st.rerun()
 
@@ -504,6 +515,12 @@ with panel_col:
 
     with tab_graph:
         graph_data = st.session_state.last_graph_data
+
+        # Show stale indicator if graph is from a previous query
+        if graph_data and not st.session_state.graph_is_current:
+            query_text = st.session_state.graph_query_text
+            truncated = query_text[:50] + "..." if len(query_text) > 50 else query_text
+            st.info(f"📌 From previous query: *\"{truncated}\"*")
 
         def _build_graph(gd: dict) -> tuple[list, list]:
             """Convert graph_query agent results into agraph Node/Edge lists."""

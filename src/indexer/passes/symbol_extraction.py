@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
 from src.indexer.ast_parser import ASTParser
 from src.indexer.neo4j_writer import Neo4jWriter
+from src.shared.embeddings import EmbeddingService, build_embedding_text
+from src.shared.settings import Settings
+
+logger = logging.getLogger(__name__)
 
 
 async def run(
@@ -19,6 +24,11 @@ async def run(
     """Extract symbols from every .py file and write to Neo4j."""
     parser = ASTParser(repo_id=repo_id)
     root = Path(repo_path)
+    
+    # Initialize embedding service
+    settings = Settings()
+    embedding_service = EmbeddingService(settings)
+    
     stats: dict[str, int] = {
         "classes": 0, "functions": 0, "methods": 0,
         "parameters": 0, "decorators": 0, "docstrings": 0, "imports": 0,
@@ -78,6 +88,12 @@ async def run(
                 all_imports.append(imp)
                 contains_rels.append({"source_id": file_sid, "target_id": imp_sid})
 
+    # Generate embeddings for semantic search
+    logger.info(f"Generating embeddings for {len(all_classes)} classes, {len(all_functions)} functions, {len(all_methods)} methods")
+    await _generate_embeddings(embedding_service, all_classes, "class")
+    await _generate_embeddings(embedding_service, all_functions, "function")
+    await _generate_embeddings(embedding_service, all_methods, "method")
+
     # Write nodes
     stats["classes"] = await writer.merge_nodes("Class", all_classes, repo_id=repo_id, commit_sha=commit_sha)
     stats["functions"] = await writer.merge_nodes("Function", all_functions, repo_id=repo_id, commit_sha=commit_sha)
@@ -93,10 +109,53 @@ async def run(
     await writer.merge_relationships("DECORATED_BY", decorated_by_rels)
     await writer.merge_relationships("DOCUMENTED_BY", documented_by_rels)
 
+    # Clean up
+    await embedding_service.close()
+
     return stats
 
 
 # -- helpers ----------------------------------------------------------------
+
+async def _generate_embeddings(
+    embedding_service: EmbeddingService,
+    entities: list[dict[str, Any]],
+    kind: str,
+) -> None:
+    """Generate and store embeddings for code entities.
+
+    Args:
+        embedding_service: The embedding service to use.
+        entities: List of entity dicts to add embeddings to.
+        kind: Entity kind ('function', 'class', 'method').
+    """
+    if not entities:
+        return
+
+    # Build texts to embed
+    texts_to_embed = []
+    for entity in entities:
+        text = build_embedding_text(
+            name=entity.get("name", ""),
+            docstring=entity.get("docstring"),
+            signature=entity.get("signature"),
+            kind=kind,
+        )
+        texts_to_embed.append(text)
+
+    try:
+        # Batch embed all texts
+        embeddings = await embedding_service.embed_batch(texts_to_embed)
+
+        # Attach embeddings to entities
+        for entity, embedding in zip(entities, embeddings):
+            entity["embedding"] = embedding
+
+        logger.debug(f"Generated {len(embeddings)} embeddings for {kind}s")
+    except Exception as e:
+        logger.error(f"Failed to generate embeddings: {e}")
+        # Continue without embeddings rather than failing
+
 
 def _collect_args(
     entity: dict, params: list, rels: list, repo_id: str,

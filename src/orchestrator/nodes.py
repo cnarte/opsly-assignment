@@ -27,7 +27,7 @@ settings = Settings()
 _GRAPH_QUERY_TOOLS = frozenset({
     "find_entity", "get_dependencies", "get_dependents",
     "trace_imports", "find_related", "execute_query",
-    "get_symbol_context", "analyze_impact",
+    "get_symbol_context", "analyze_impact", "list_entities",
 })
 _CODE_ANALYST_TOOLS = frozenset({
     "explain_implementation", "analyze_function", "analyze_class",
@@ -190,6 +190,28 @@ _LIFECYCLE_KEYWORDS = frozenset({
     "full flow", "end to end", "end-to-end",
 })
 
+# Map query keywords → entity_type for the list_entities fast-path
+_LIST_ENTITY_MAP: dict[str, str] = {
+    "functions": "Function",
+    "function": "Function",
+    "classes": "Class",
+    "class": "Class",
+    "methods": "Method",
+    "method": "Method",
+    "modules": "Module",
+    "module": "Module",
+    "files": "File",
+    "file": "File",
+    "decorators": "Decorator",
+    "decorator": "Decorator",
+}
+
+_LIST_TRIGGERS = frozenset({
+    "get all", "get me all", "list all", "show all", "show me all",
+    "fetch all", "find all", "give me all", "enumerate",
+    "all the", "all of the",
+})
+
 _ENTITY_HINTS = ["fastapi", "apirouter", "request", "response", "starlette"]
 
 
@@ -206,6 +228,99 @@ def _fast_entity_extract(query: str) -> str:
     import re
     words = re.findall(r"[A-Z][a-zA-Z0-9_]+", query)
     return words[0] if words else "FastAPI"
+
+
+# ---------------------------------------------------------------------------
+# Node: rewrite_query (new path filtering + semantic search logic)
+# ---------------------------------------------------------------------------
+
+
+async def rewrite_query(state: OrchestratorState) -> dict[str, Any]:
+    """Analyze user query for path filtering and semantic search needs.
+
+    Detects:
+    - Path inclusion/exclusion phrases ("not from docs", "only from fastapi/")
+    - Whether semantic search is needed vs exact matching
+    - Entity type hints ("functions", "classes")
+
+    Returns structured search parameters consumed by downstream tools.
+    """
+    query = _extract_query(state)
+    if not query:
+        return {"search_params": {}}
+
+    q_lower = query.lower()
+
+    # Path filtering detection
+    exclude_paths: list[str] = []
+    path_prefix = ""
+
+    # Common exclusions
+    exclusion_patterns = {
+        "not from docs": ["docs_src"],
+        "exclude docs": ["docs_src"],
+        "skip docs": ["docs_src"],
+        "no docs": ["docs_src"],
+        "not tests": ["tests"],
+        "exclude tests": ["tests"],
+        "skip tests": ["tests"],
+        "no tests": ["tests"],
+        "not examples": ["examples"],
+        "skip examples": ["examples"],
+    }
+
+    for pattern, paths_to_exclude in exclusion_patterns.items():
+        if pattern in q_lower:
+            exclude_paths.extend(paths_to_exclude)
+
+    # Path inclusion detection
+    inclusion_patterns = {
+        "from fastapi": "fastapi",
+        "in fastapi": "fastapi",
+        "fastapi only": "fastapi",
+        "from src": "src",
+        "in src": "src",
+    }
+
+    for pattern, prefix in inclusion_patterns.items():
+        if pattern in q_lower:
+            path_prefix = prefix
+            break
+
+    # Entity type detection
+    entity_type = "Function"  # default
+    for keyword, etype in _LIST_ENTITY_MAP.items():
+        if keyword in q_lower:
+            entity_type = etype
+            break
+
+    # Determine search type
+    search_type = "exact"
+    
+    # Is this a "list all" query?
+    if any(trigger in q_lower for trigger in _LIST_TRIGGERS):
+        search_type = "list"
+    # Is this semantic (describes what code does)?
+    elif any(phrase in q_lower for phrase in [
+        "that", "which", "handle", "deal with", "authenticate",
+        "validate", "error", "check", "verify", "parse",
+    ]):
+        search_type = "semantic"
+
+    search_params = {
+        "search_type": search_type,
+        "entity_type": entity_type,
+        "path_prefix": path_prefix,
+        "exclude_paths": list(set(exclude_paths)) if exclude_paths else [],
+        "detected_patterns": {
+            "has_list_trigger": any(t in q_lower for t in _LIST_TRIGGERS),
+            "has_exclusion": bool(exclude_paths),
+            "has_inclusion": bool(path_prefix),
+        },
+    }
+
+    logger.debug(f"Query rewrite: {search_params}")
+    return {"search_params": search_params}
 
 
 async def classify_query(state: OrchestratorState) -> dict[str, Any]:
@@ -270,6 +385,19 @@ async def classify_query(state: OrchestratorState) -> dict[str, Any]:
             and isinstance(args, dict)
         ):
             tool_plan.append({"agent": agent, "tool": tool, "args": args})
+
+    # Inject path filtering parameters into list_entities and semantic_search tools
+    search_params = state.get("search_params", {})
+    if search_params:
+        path_prefix = search_params.get("path_prefix", "")
+        exclude_paths = search_params.get("exclude_paths", [])
+        
+        for entry in tool_plan:
+            if entry.get("tool") in {"list_entities", "semantic_search"}:
+                if path_prefix:
+                    entry["args"]["path_prefix"] = path_prefix
+                if exclude_paths:
+                    entry["args"]["exclude_paths"] = exclude_paths
 
     return {
         "query_classification": {
@@ -536,23 +664,50 @@ def _summarise_agent_result(agent_name: str, result: dict) -> str:
             )
             continue
 
-        # find_entity / find_related → list names only
+        # list_entities → structured table
+        if "entities" in tool_result and "entity_type" in tool_result:
+            etype = tool_result["entity_type"]
+            total = tool_result.get("total_in_graph", "?")
+            showing = tool_result.get("showing", 0)
+            rows = []
+            for e in tool_result["entities"][:50]:
+                name = e.get("name", "?")
+                fp = e.get("file_path", "")
+                line = e.get("start_line", "")
+                rows.append(f"  {name}  {fp}:{line}" if fp else f"  {name}")
+            lines.append(
+                f"{tool_name} list_entities type={etype} "
+                f"(total={total}, showing={showing}):\n" + "\n".join(rows)
+            )
+            continue
+
+        # find_entity / find_related / execute_query → extract whatever columns exist
         if "results" in tool_result:
             results = tool_result["results"]
             entity = tool_result.get("entity", "")
             rel = tool_result.get("relationship", "")
-            names = []
+            rows = []
             for r in results[:20]:
-                name = (r.get("n") or r.get("node") or r.get("source") or r.get("target") or {})
-                if isinstance(name, dict):
-                    name = name.get("name", "?")
-                names.append(str(name))
-            header = f"{tool_name}"
+                if not isinstance(r, dict):
+                    rows.append(str(r))
+                    continue
+                # Try well-known node keys first
+                node = r.get("n") or r.get("node") or r.get("f") or r.get("m") or r.get("c")
+                if isinstance(node, dict):
+                    name = node.get("name") or node.get("qualified_name", "?")
+                    fp = node.get("file_path", "")
+                    line = node.get("start_line", "")
+                    rows.append(f"{name}  {fp}:{line}" if fp else name)
+                else:
+                    # Dynamic columns from execute_query — just join all values
+                    vals = [str(v) for v in r.values() if v is not None]
+                    rows.append("  ".join(vals) if vals else "?")
+            header = tool_name
             if entity:
                 header += f" entity={entity}"
             if rel:
                 header += f" rel={rel}"
-            lines.append(f"{header}: {len(results)} results — {', '.join(names)}")
+            lines.append(f"{header}: {len(results)} results\n" + "\n".join(f"  {row}" for row in rows))
             continue
 
         # get_dependencies / get_dependents

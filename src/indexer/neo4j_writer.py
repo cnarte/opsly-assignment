@@ -81,6 +81,22 @@ class Neo4jWriter:
                 except Exception:
                     pass
 
+        # Vector indexes for semantic search (Neo4j 5.11+)
+        # Create vector indexes on labels that will have embeddings
+        vector_labels = ["Function", "Method", "Class"]
+        for label in vector_labels:
+            try:
+                await self._client.execute_write(
+                    f"CREATE VECTOR INDEX {label.lower()}_embedding IF NOT EXISTS "
+                    f"FOR (n:{label}) ON (n.embedding) "
+                    f"OPTIONS {{indexConfig: {{"
+                    f"`vector.dimensions`: 1536, "
+                    f"`vector.similarity_function`: 'cosine'"
+                    f"}}}}"
+                )
+            except Exception:
+                pass  # Vector index syntax requires Neo4j 5.11+
+
     # -- node writing ----------------------------------------------------------
 
     async def merge_nodes(

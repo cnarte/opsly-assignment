@@ -15,6 +15,7 @@ from src.orchestrator.nodes import (
     classify_query,
     persist_interaction,
     plan_agents,
+    rewrite_query,
     synthesize,
 )
 from src.orchestrator.state import OrchestratorState
@@ -61,6 +62,7 @@ def build_orchestrator_graph() -> Any:
 
     # -- nodes ---------------------------------------------------------------
     graph.add_node("check_cache",        check_cache)
+    graph.add_node("rewrite",            rewrite_query)
     graph.add_node("classify",           classify_query)
     graph.add_node("plan",               plan_agents)
     graph.add_node("call_graph_query",   call_graph_query)
@@ -74,16 +76,17 @@ def build_orchestrator_graph() -> Any:
     graph.set_entry_point("check_cache")
 
     # If cache hit → go straight to persist (no-op) → END
-    # If cache miss → full pipeline
+    # If cache miss → rewrite query → classify
     graph.add_conditional_edges(
         "check_cache",
         _route_after_cache,
         {
-            "classify":  "classify",
+            "classify":  "rewrite",
             "__end__":   END,
         },
     )
 
+    graph.add_edge("rewrite", "classify")
     graph.add_edge("classify", "plan")
 
     # Conditional fan-out from plan to agent nodes (or straight to synthesize)
