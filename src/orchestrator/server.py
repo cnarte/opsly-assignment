@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import FastAPI as _FastAPI
 from fastapi.responses import StreamingResponse as _StreamingResponse
 import json as _json
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from mcp.server.fastmcp import FastMCP
 
 from langgraph.errors import GraphRecursionError
@@ -106,14 +106,15 @@ def _initial_state(message: str, session_id: str, repo_id: str, model: str) -> O
 
 def _collect_partial_results(messages: list) -> str:
     """Extract ToolMessage content from a message list and join as a single string."""
-    from langchain_core.messages import ToolMessage
     parts = [m.content for m in messages if isinstance(m, ToolMessage) and m.content]
     return "\n\n".join(parts)
 
 
 async def _synthesize_partial(partial_content: str, query: str, model: str = "") -> str:
     """Ask the LLM to synthesise whatever partial tool results were collected."""
-    from langchain_core.messages import SystemMessage, HumanMessage as _HM
+    if not partial_content.strip():
+        return "The query could not be completed — no results were collected before the exploration limit was reached."
+    from langchain_core.messages import HumanMessage as _HM
     llm = _get_llm(model)
     prompt = (
         "You are summarising partial research results. The following tool results were "

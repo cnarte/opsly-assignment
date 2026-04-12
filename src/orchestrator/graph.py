@@ -43,4 +43,6 @@ def build_orchestrator_graph() -> Any:
     graph.add_edge("tools", "agent")
     graph.add_edge("persist", END)
 
+    # TODO: replace MemorySaver with a persistent checkpointer (e.g. PostgresSaver)
+    # before production — MemorySaver is in-process only and grows unboundedly.
     return graph.compile(checkpointer=MemorySaver())
