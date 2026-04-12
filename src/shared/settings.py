@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_MODEL: str = "nvidia/nemotron-3-super-120b-a12b:free"
 
+    # OpenAI Embeddings
+    OPENAI_API_KEY: str = ""
+    EMBEDDING_MODEL: str = "text-embedding-3-small"
+    EMBEDDING_DIMENSIONS: int = 1536
+
     # Neo4j
     NEO4J_URI: str = "bolt://localhost:7687"
     NEO4J_USER: str = "neo4j"
@@ -37,6 +42,7 @@ class Settings(BaseSettings):
     GRAPH_QUERY_PORT: int = 8012
     CODE_ANALYST_PORT: int = 8013
     MEMORY_PORT: int = 8014
+    GITNEXUS_PORT: int = 8015
     GATEWAY_PORT: int = 8000
 
     # MCP client behaviour
