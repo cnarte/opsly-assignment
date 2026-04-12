@@ -721,8 +721,10 @@ with panel_col:
                     root_id = f"[{entity_type_label}s]"
                     _node(root_id, [entity_type_label], 32)
                     for folder, folder_data in sorted(tree.items(), key=lambda x: -x[1]["count"]):
-                        folder_id = f"{folder}/"
-                        _node(folder_id, ["Folder"], 24)
+                        display_folder = "(root files)" if folder == "_root" else f"{folder}/"
+                        folder_label = "Root" if folder == "_root" else "Folder"
+                        folder_id = display_folder
+                        _node(folder_id, [folder_label], 24)
                         _edge(root_id, folder_id, str(folder_data["count"]), "#F59E0B")
                         for filename, count in sorted(folder_data["files"].items(), key=lambda x: -x[1])[:10]:
                             file_id = f"{folder}/{filename}"

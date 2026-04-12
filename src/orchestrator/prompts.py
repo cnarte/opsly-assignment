@@ -14,7 +14,7 @@ You have access to tools for:
 - Retrieving source code snippets (get_code_snippet)
 - Detecting patterns in code (find_patterns)
 - Comparing two implementations (compare_implementations)
-- Listing all entities of a type (list_entities)
+- Listing all entities of a type (list_entities_tree for folder-grouped view; list_entities for raw names)
 
 Guidelines:
 - Use as many tool calls as needed to give a complete, accurate answer.

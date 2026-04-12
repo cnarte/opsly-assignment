@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -16,6 +17,17 @@ logger = logging.getLogger(__name__)
 settings = Settings()
 
 mcp = FastMCP("graph-query-agent", host="0.0.0.0", port=settings.GRAPH_QUERY_PORT)
+
+# Safety guard for Cypher injection prevention
+_SAFE_PREFIX = re.compile(r'^[A-Za-z][A-Za-z0-9_]*$')
+
+# Entity type mapping for LadybugDB id-prefix resolution
+_ENTITY_TYPE_MAP = {
+    "function": "Function", "functions": "Function",
+    "class": "Class", "classes": "Class",
+    "file": "File", "files": "File",
+    "folder": "Folder", "module": "File",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -156,13 +168,8 @@ async def list_entities(entity_type: str, limit: int = 50, repo_id: str = "") ->
     """
     # LadybugDB stores node types as id prefixes (e.g. "Function:my_func")
     # Map common aliases to their prefix
-    _type_map = {
-        "function": "Function", "functions": "Function",
-        "class": "Class", "classes": "Class",
-        "file": "File", "files": "File",
-        "folder": "Folder", "module": "File",
-    }
-    prefix = _type_map.get(entity_type.lower(), entity_type.capitalize())
+    prefix_raw = _ENTITY_TYPE_MAP.get(entity_type.lower(), entity_type.capitalize())
+    prefix = prefix_raw if _SAFE_PREFIX.match(prefix_raw) else "Function"
     cap = min(limit, 200)
     cypher = (
         f'MATCH (n) WHERE n.id STARTS WITH "{prefix}:" AND n.name IS NOT NULL '
@@ -180,13 +187,8 @@ async def list_entities_tree(entity_type: str, repo_id: str = "") -> dict:
     Returns a compact tree rather than a flat list — safe for large codebases.
     entity_type: Function, Class, File, Folder (LadybugDB id-prefix based).
     """
-    _type_map = {
-        "function": "Function", "functions": "Function",
-        "class": "Class", "classes": "Class",
-        "file": "File", "files": "File",
-        "folder": "Folder", "module": "File",
-    }
-    prefix = _type_map.get(entity_type.lower(), entity_type.capitalize())
+    prefix_raw = _ENTITY_TYPE_MAP.get(entity_type.lower(), entity_type.capitalize())
+    prefix = prefix_raw if _SAFE_PREFIX.match(prefix_raw) else "Function"
     cypher = (
         f'MATCH (n) WHERE n.id STARTS WITH "{prefix}:" AND n.name IS NOT NULL '
         f'RETURN n.name AS name, n.filePath AS file_path LIMIT 5000'
@@ -199,7 +201,7 @@ async def list_entities_tree(entity_type: str, repo_id: str = "") -> dict:
         fp: str = row.get("file_path") or ""
         parts = fp.split("/")
         folder = parts[0] if len(parts) > 1 else "_root"
-        filename = parts[-1] if parts else fp or "_unknown"
+        filename = parts[-1] or "_unknown"
 
         if folder not in tree:
             tree[folder] = {"count": 0, "files": {}}
