@@ -32,17 +32,25 @@ WORKSPACE = Path(os.getenv("WORKSPACE_PATH", "/workspace/repos"))
 
 
 async def _clone_repo(repo_url: str, ref: str, dest: Path) -> str:
-    """Clone `repo_url` into `dest` and return the commit SHA."""
-    cmd = ["git", "clone", "--depth", "1"]
-    if ref:
-        cmd += ["--branch", ref]
-    cmd += [repo_url, str(dest)]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"git clone failed: {stderr.decode().strip()}")
+    """Clone `repo_url` into `dest` and return the commit SHA.
+
+    If `dest` already contains a git repository, skip cloning and just
+    return the current HEAD commit SHA.
+    """
+    git_dir = dest / ".git"
+    if git_dir.exists():
+        logger.info("Repo already exists at %s, skipping clone", dest)
+    else:
+        cmd = ["git", "clone", "--depth", "1"]
+        if ref:
+            cmd += ["--branch", ref]
+        cmd += [repo_url, str(dest)]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(f"git clone failed: {stderr.decode().strip()}")
     sha_proc = await asyncio.create_subprocess_exec(
         "git", "-C", str(dest), "rev-parse", "HEAD",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -65,6 +73,31 @@ async def _call_gitnexus(path: str, repo_name: str) -> dict:
             if result.content:
                 return json.loads(result.content[0].text)
             return {}
+
+
+async def _analyze_repo_direct(path: str, repo_name: str) -> dict:
+    """Run `gitnexus analyze <path>` directly (no MCP hop) and register with graph-query."""
+    logger.info("Indexing repo '%s' at %s directly", repo_name, path)
+
+    # Check if already indexed — try `gitnexus index` first (fast path)
+    gitnexus_dir = Path(path) / ".gitnexus"
+    if gitnexus_dir.exists():
+        cmd = ["gitnexus", "index", path]
+    else:
+        cmd = ["gitnexus", "analyze", path]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        out = stderr.decode().strip() or stdout.decode().strip()
+        raise RuntimeError(f"gitnexus analyze/index failed for '{repo_name}': {out}")
+
+    logger.info("Indexed '%s' successfully", repo_name)
+    return {"status": "indexed", "repo": repo_name, "path": path}
 
 
 # ---------------------------------------------------------------------------

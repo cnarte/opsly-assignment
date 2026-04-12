@@ -80,20 +80,22 @@ async def list_repos() -> dict:
     """Return all repos indexed in LadybugDB (via gitnexus-agent)."""
     raw = await call_agent_tool(settings.GITNEXUS_PORT, "list_repos", {})
 
-    # raw is {"result": "<json-array>\n\n---\n..."}  or {"error": "..."}
     if "error" in raw:
         logger.error("list_repos tool error: %s", raw["error"])
         return {"repos": []}
 
+    # New format: {"repos": ["fastapi", ...]}
+    if "repos" in raw:
+        return {"repos": raw["repos"]}
+
+    # Legacy/fallback: {"result": "<text>"} or {"result": "[...]"}
     result_text: str = raw.get("result", "") or ""
-    # Extract the JSON array that appears before the optional "---" separator
     text_before_separator = result_text.split("---")[0].strip()
 
     repos: list[str] = []
     try:
         parsed = json.loads(text_before_separator)
         if isinstance(parsed, list):
-            # Each item may be a string name or a dict with a "name" key
             for item in parsed:
                 if isinstance(item, str):
                     repos.append(item)

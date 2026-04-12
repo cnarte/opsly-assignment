@@ -6,6 +6,7 @@ import json
 import logging
 from contextlib import AsyncExitStack
 
+import anyio
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
@@ -67,17 +68,25 @@ class GitNexusClient:
     # ------------------------------------------------------------------
 
     async def analyze_repo(self, path: str, repo_name: str) -> dict:
-        """Run `gitnexus analyze <path>` to index a repo into LadybugDB."""
+        """Run `gitnexus analyze <path>` (or `index` if already analyzed) to register the repo."""
+        import os
+        from pathlib import Path
+
         logger.info("Indexing repo '%s' at %s", repo_name, path)
-        proc = await asyncio.create_subprocess_exec(
-            "gitnexus", "analyze", path, "--skip-embeddings",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
+
+        # Use `gitnexus index` if .gitnexus already exists (fast, no re-analysis)
+        gitnexus_dir = Path(path) / ".gitnexus"
+        if gitnexus_dir.exists():
+            cmd = ["gitnexus", "index", path]
+        else:
+            cmd = ["gitnexus", "analyze", path]
+
+        # Use anyio.run_process to stay within anyio's task group context
+        result = await anyio.run_process(cmd, check=False)
+        if result.returncode != 0:
+            err = result.stderr.decode().strip() or result.stdout.decode().strip()
             raise RuntimeError(
-                f"gitnexus analyze failed for '{repo_name}': {stderr.decode().strip()}"
+                f"gitnexus failed for '{repo_name}': {err}"
             )
         logger.info("Indexed '%s' successfully", repo_name)
         return {"status": "indexed", "repo": repo_name, "path": path}

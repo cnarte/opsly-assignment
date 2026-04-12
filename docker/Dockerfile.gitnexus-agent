@@ -24,6 +24,10 @@ COPY src/ src/
 # Workspace volume mount point
 RUN mkdir -p /workspace/repos
 
+# Entrypoint script that re-registers repos from workspace on startup
+COPY docker/gitnexus_agent_entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 EXPOSE 8015
 
-CMD ["python", "-m", "src.gitnexus_agent.server"]
+CMD ["/entrypoint.sh"]
