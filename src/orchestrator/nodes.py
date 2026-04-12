@@ -160,6 +160,11 @@ def build_tools(repo_id: str = "", model: str = "") -> list:
          {"symbol_name": {"type": "string"}, "depth": {"type": "integer", "default": 2}, "repo_id": {"type": "string"}}),
         ("list_entities", "List all entities of a type (Function, Class, Method, Module, File).",
          {"entity_type": {"type": "string"}, "limit": {"type": "integer", "default": 50}, "repo_id": {"type": "string"}}),
+        ("list_entities_tree",
+         "List all entities of a type grouped into a folder/file tree. "
+         "Use this instead of list_entities for 'get all X' queries — returns a compact summary safe for large repos.",
+         {"entity_type": {"type": "string", "description": "Function, Class, File, Folder"},
+          "repo_id": {"type": "string"}}),
     ]:
         tools.append(_make_mcp_tool("graph_query", gq_port, name, desc, schema))
 

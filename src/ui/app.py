@@ -714,6 +714,21 @@ with panel_col:
                         if i > 0:
                             _edge(chain[i - 1], mod, "IMPORTS", "#EF4444")
 
+                # list_entities_tree → {"entity_type": "...", "total": N, "tree": {"folder": {"count": N, "files": {...}}}}
+                tree = tool_result.get("tree")
+                entity_type_label = tool_result.get("entity_type", "Entity")
+                if isinstance(tree, dict) and tree:
+                    root_id = f"[{entity_type_label}s]"
+                    _node(root_id, [entity_type_label], 32)
+                    for folder, folder_data in sorted(tree.items(), key=lambda x: -x[1]["count"]):
+                        folder_id = f"{folder}/"
+                        _node(folder_id, ["Folder"], 24)
+                        _edge(root_id, folder_id, str(folder_data["count"]), "#F59E0B")
+                        for filename, count in sorted(folder_data["files"].items(), key=lambda x: -x[1])[:10]:
+                            file_id = f"{folder}/{filename}"
+                            _node(file_id, ["File"], 18)
+                            _edge(folder_id, file_id, str(count), "#64748B")
+
             return g_nodes, g_edges
 
         if not graph_data:

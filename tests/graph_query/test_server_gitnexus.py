@@ -43,3 +43,55 @@ async def test_execute_query_calls_cypher_tool():
         from src.graph_query import server as srv_mod
         await srv_mod.execute_query("MATCH (n:Function) RETURN n LIMIT 5")
         mock.assert_awaited_once_with("cypher", {"query": "MATCH (n:Function) RETURN n LIMIT 5"})
+
+
+@pytest.mark.asyncio
+async def test_list_entities_tree_groups_by_folder():
+    """list_entities_tree should group results by folder prefix."""
+    markdown = (
+        "| name | file_path |\n"
+        "| --- | --- |\n"
+        "| get_item | fastapi/routing.py |\n"
+        "| add_route | fastapi/routing.py |\n"
+        "| test_get | tests/test_routing.py |\n"
+    )
+    mock_result = {"markdown": markdown, "row_count": 3}
+
+    with patch("src.graph_query.server._call_gitnexus", _mock_call(mock_result)):
+        from src.graph_query import server as srv
+        result = await srv.list_entities_tree("Function")
+
+    assert result["total"] == 3
+    tree = result["tree"]
+    assert "fastapi" in tree
+    assert tree["fastapi"]["count"] == 2
+    assert tree["fastapi"]["files"]["routing.py"] == 2
+    assert "tests" in tree
+    assert tree["tests"]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_list_entities_tree_handles_empty():
+    """list_entities_tree should return zero totals on empty gitnexus result."""
+    with patch("src.graph_query.server._call_gitnexus", _mock_call({})):
+        from src.graph_query import server as srv
+        result = await srv.list_entities_tree("Function")
+
+    assert result["total"] == 0
+    assert result["tree"] == {}
+
+
+@pytest.mark.asyncio
+async def test_list_entities_tree_rootlevel_file():
+    """Files with no folder prefix (e.g. 'main.py') should go under '_root'."""
+    markdown = (
+        "| name | file_path |\n"
+        "| --- | --- |\n"
+        "| main_func | main.py |\n"
+    )
+    with patch("src.graph_query.server._call_gitnexus", _mock_call({"markdown": markdown, "row_count": 1})):
+        from src.graph_query import server as srv
+        result = await srv.list_entities_tree("Function")
+
+    assert "_root" in result["tree"]
+    assert result["tree"]["_root"]["files"]["main.py"] == 1

@@ -173,6 +173,46 @@ async def list_entities(entity_type: str, limit: int = 50, repo_id: str = "") ->
     return {"entity_type": prefix, "entities": rows, "count": len(rows)}
 
 
+@mcp.tool()
+async def list_entities_tree(entity_type: str, repo_id: str = "") -> dict:
+    """List all entities of a type grouped into a folder/file tree.
+
+    Returns a compact tree rather than a flat list — safe for large codebases.
+    entity_type: Function, Class, File, Folder (LadybugDB id-prefix based).
+    """
+    _type_map = {
+        "function": "Function", "functions": "Function",
+        "class": "Class", "classes": "Class",
+        "file": "File", "files": "File",
+        "folder": "Folder", "module": "File",
+    }
+    prefix = _type_map.get(entity_type.lower(), entity_type.capitalize())
+    cypher = (
+        f'MATCH (n) WHERE n.id STARTS WITH "{prefix}:" AND n.name IS NOT NULL '
+        f'RETURN n.name AS name, n.filePath AS file_path LIMIT 5000'
+    )
+    result = await _call_gitnexus("cypher", _repo_args({"query_str": cypher}, repo_id))
+    rows = _parse_result(result)
+
+    tree: dict[str, dict] = {}
+    for row in rows:
+        fp: str = row.get("file_path") or ""
+        parts = fp.split("/")
+        folder = parts[0] if len(parts) > 1 else "_root"
+        filename = parts[-1] if parts else fp or "_unknown"
+
+        if folder not in tree:
+            tree[folder] = {"count": 0, "files": {}}
+        tree[folder]["count"] += 1
+        tree[folder]["files"][filename] = tree[folder]["files"].get(filename, 0) + 1
+
+    return {
+        "entity_type": prefix,
+        "total": len(rows),
+        "tree": tree,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
