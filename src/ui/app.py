@@ -752,22 +752,24 @@ with panel_col:
 # ---------------------------------------------------------------------------
 
 st.divider()
-foot_cols = st.columns(5)
 stats_data = api_get("/api/graph/statistics")
 if "error" not in stats_data:
     labels = stats_data.get("labels", {})
-    metrics = [
-        ("Classes", labels.get("Class", 0), "🏗️"),
-        ("Functions", labels.get("Function", 0), "⚡"),
-        ("Methods", labels.get("Method", 0), "🔧"),
-        ("Imports", labels.get("Import", 0), "📥"),
-        ("Decorators", labels.get("Decorator", 0), "🎨"),
-    ]
-    for col, (name, val, icon) in zip(foot_cols, metrics):
+    # Icon map for known label types; unlisted types get a generic icon
+    _LABEL_ICONS = {
+        "Function": "⚡", "Method": "🔧", "Class": "🏗️",
+        "File": "📄", "Folder": "📁", "Process": "🔄", "Cluster": "🔗",
+        "Import": "📥", "Decorator": "🎨",
+    }
+    # Only show labels that exist in the index (count > 0)
+    active = [(label, cnt) for label, cnt in sorted(labels.items(), key=lambda x: -x[1]) if cnt > 0]
+    foot_cols = st.columns(max(len(active), 1))
+    for col, (label, cnt) in zip(foot_cols, active):
+        icon = _LABEL_ICONS.get(label, "🔵")
         col.markdown(
             f'<div class="metric-card">'
-            f'<div class="metric-value">{val:,}</div>'
-            f'<div class="metric-label">{icon} {name}</div>'
+            f'<div class="metric-value">{cnt:,}</div>'
+            f'<div class="metric-label">{icon} {label}s</div>'
             f'</div>',
             unsafe_allow_html=True,
         )

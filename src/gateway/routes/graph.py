@@ -53,6 +53,7 @@ async def _gitnexus_cypher(query: str) -> list[dict]:
 _NODE_TYPES = [
     ("Function", "Function"),
     ("Class", "Class"),
+    ("Method", "Method"),
     ("File", "File"),
     ("Folder", "Folder"),
     ("Process", "Process"),
