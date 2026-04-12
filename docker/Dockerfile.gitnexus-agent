@@ -1,0 +1,29 @@
+# docker/Dockerfile.gitnexus-agent
+# Python 3.12 + Node.js 20 + gitnexus CLI
+FROM python:3.12-slim
+
+# Install Node.js 20 and git (needed for gitnexus analyze)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl git ca-certificates python3 make g++ \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install gitnexus CLI globally
+RUN npm install -g gitnexus
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY pyproject.toml .
+RUN pip install --no-cache-dir .
+
+# Copy source
+COPY src/ src/
+
+# Workspace volume mount point
+RUN mkdir -p /workspace/repos
+
+EXPOSE 8015
+
+CMD ["python", "-m", "src.gitnexus_agent.server"]
