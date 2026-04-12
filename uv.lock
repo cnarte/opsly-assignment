@@ -489,6 +489,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "graphiti-core" },
+    { name = "httpx" },
     { name = "langchain-mcp-adapters" },
     { name = "langchain-openrouter" },
     { name = "langgraph" },
@@ -525,6 +526,7 @@ dev = [
 requires-dist = [
     { name = "fastapi" },
     { name = "graphiti-core" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'dev'" },
     { name = "httpx", marker = "extra == 'ui'" },
     { name = "langchain-mcp-adapters" },

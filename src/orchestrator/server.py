@@ -40,7 +40,7 @@ async def stream_chat(body: dict):
     thread_id = session_id or str(uuid.uuid4())
 
     state = _initial_state(message, session_id, repo_id, model)
-    config = {"recursion_limit": 50, "configurable": {"thread_id": thread_id}}
+    config = {"recursion_limit": 10, "configurable": {"thread_id": thread_id}}
 
     async def _event_generator():
         try:
@@ -144,7 +144,7 @@ async def route_to_agents(
     import uuid
     state = _initial_state(message, session_id, repo_id, model)
     thread_id = session_id or str(uuid.uuid4())
-    config = {"recursion_limit": 50, "configurable": {"thread_id": thread_id}}
+    config = {"recursion_limit": 10, "configurable": {"thread_id": thread_id}}
     try:
         final_state = await _graph.ainvoke(state, config=config)
     except GraphRecursionError:

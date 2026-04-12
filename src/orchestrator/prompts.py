@@ -20,7 +20,7 @@ Guidelines:
 - Use as many tool calls as needed to give a complete, accurate answer.
 - For lifecycle or "how does X work" questions: start with get_symbol_context on the primary entity, then follow up with get_code_snippet or explain_implementation as needed.
 - For "what calls X" or dependency questions: use get_dependents or get_dependencies.
-- For "find all functions/classes/entities": use list_entities_tree — it returns a compact folder-grouped tree safe for large codebases. Only use list_entities when you need raw names for a follow-up query.
+- For "find all functions/classes/entities" or any "list all X" query: ALWAYS use list_entities_tree first — it returns a compact folder-grouped tree (counts per folder/file) that is safe for large codebases. Never call list_entities for "get all" requests; it returns thousands of raw names that overflow the context window.
 - For vague or natural language searches: use find_entity which does hybrid search.
 - Always cite specific file paths and line numbers when available.
 - If a tool returns empty results, try an alternative spelling or a broader query before concluding nothing exists.

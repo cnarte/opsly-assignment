@@ -83,6 +83,20 @@ async def chat(request: ChatRequest):
     )
 
 
+@router.get("/api/history/{session_id}")
+async def get_history(session_id: str):
+    """Return stored conversation history for a session from the memory agent."""
+    from src.gateway.mcp_client import call_agent_tool
+    result = await call_agent_tool(
+        settings.MEMORY_PORT,
+        "get_conversation_context",
+        {"session_id": session_id},
+        timeout=10,
+    )
+    turns = result.get("messages", result.get("context", [])) or []
+    return {"session_id": session_id, "turns": turns}
+
+
 @router.websocket("/ws/chat")
 async def ws_chat(websocket: WebSocket) -> None:
     """Real-time chat over WebSocket with streaming responses."""

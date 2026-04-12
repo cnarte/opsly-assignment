@@ -397,7 +397,25 @@ with st.sidebar:
 
     # -- Session controls --
     st.markdown('<div class="section-header">Session</div>', unsafe_allow_html=True)
-    st.caption(f"ID: `{st.session_state.session_id[:8]}...`")
+    st.caption(f"ID: `{st.session_state.session_id}`")
+    load_id = st.text_input("Load session ID", placeholder="paste a session ID…", label_visibility="collapsed")
+    if st.button("Load", use_container_width=True, disabled=not load_id.strip()):
+        sid = load_id.strip()
+        history = api_get(f"/api/history/{sid}")
+        turns = history.get("turns", [])
+        loaded_messages = []
+        for turn in turns:
+            role = turn.get("role", "")
+            content = turn.get("content", "")
+            if role in ("user", "assistant") and content:
+                loaded_messages.append({"role": role, "content": content})
+        st.session_state.messages = loaded_messages
+        st.session_state.session_id = sid
+        st.session_state.agent_activities = []
+        st.session_state.last_graph_data = None
+        st.session_state.graph_query_text = ""
+        st.session_state.graph_is_current = True
+        st.rerun()
     if st.button("🔄 New Session", use_container_width=True):
         st.session_state.messages = []
         st.session_state.session_id = str(uuid.uuid4())

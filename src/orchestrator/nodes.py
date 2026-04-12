@@ -31,7 +31,7 @@ def _get_llm(model: str = "") -> ChatOpenRouter:
     )
 
 
-async def _compress_tool_result(result: str, tool_name: str = "", max_chars: int = 3000) -> str:
+async def _compress_tool_result(result: str, tool_name: str = "", max_chars: int = 8000) -> str:
     """LLM-summarise tool results that are too large for the agent context window.
 
     Results under max_chars pass through unchanged (no LLM call, no latency).
@@ -44,7 +44,7 @@ async def _compress_tool_result(result: str, tool_name: str = "", max_chars: int
         f"The following is the raw output of the '{tool_name}' tool. "
         "Summarise it concisely so the key information is preserved in under 500 words. "
         "Preserve file paths, counts, and names. Do not add commentary.\n\n"
-        f"{result[:12000]}"
+        f"{result[:4000]}"
     )
     try:
         llm = _get_llm()
@@ -52,7 +52,13 @@ async def _compress_tool_result(result: str, tool_name: str = "", max_chars: int
         return response.content
     except Exception as exc:
         logger.warning("Tool result compression failed for %s: %s", tool_name, exc)
-        return result[:max_chars]
+        hint = (
+            "\n\n[Result truncated — too large to summarise. "
+            "Call list_entities_tree instead for a compact folder-grouped view.]"
+            if "list_entities" in tool_name
+            else "\n\n[Result truncated — too large to summarise.]"
+        )
+        return result[:max_chars] + hint
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +214,7 @@ async def inject_history(state: OrchestratorState) -> dict:
         timeout=10,
     )
 
-    prior: list = history_result.get("context", []) or []
+    prior: list = history_result.get("messages", history_result.get("context", [])) or []
     history_messages = []
     for turn in prior[-10:]:
         role = turn.get("role", "")
@@ -251,7 +257,7 @@ async def persist_turn(state: OrchestratorState) -> dict:
         await _call_mcp_agent(
             "memory", settings.MEMORY_PORT,
             "store_interaction",
-            {"session_id": session_id, "user_message": user_msg, "assistant_response": ai_msg},
+            {"session_id": session_id, "query": user_msg, "response": ai_msg},
             timeout=10,
         )
     return {"final_response": ai_msg}
