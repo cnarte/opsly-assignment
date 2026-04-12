@@ -3,22 +3,89 @@
 from __future__ import annotations
 
 import logging
+import os as _os
+import json as _json
 from typing import Any
 
 from langchain_core.messages import HumanMessage
 
-from src.shared.neo4j_client import Neo4jClient
 from src.shared.settings import Settings
 
 logger = logging.getLogger(__name__)
 
 
+async def _locate_symbol(symbol_name: str, repo_id: str = "") -> dict:
+    """Find a symbol's file_path and start_line via gitnexus-agent.context."""
+    from mcp.client.streamable_http import streamablehttp_client
+    from mcp import ClientSession
+    from src.shared.settings import Settings as _Settings
+    _settings = _Settings()
+
+    host = "gitnexus-agent" if _os.path.exists("/.dockerenv") else "localhost"
+    url = f"http://{host}:{_settings.GITNEXUS_PORT}/mcp"
+    args = {"symbol": symbol_name}
+    if repo_id:
+        args["repo"] = repo_id
+    try:
+        async with streamablehttp_client(url) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool("context", args)
+                if result.content:
+                    data = _json.loads(result.content[0].text)
+                    return {
+                        "file_path": data.get("file_path") or data.get("file") or "",
+                        "start_line": data.get("start_line") or data.get("line") or 0,
+                        "repo": data.get("repo", ""),
+                    }
+    except Exception:
+        pass
+    return {"file_path": "", "start_line": 0}
+
+
+async def explain_entity(entity_name: str, model: str = "") -> str:
+    """Locate a symbol via gitnexus, read source, explain with LLM."""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_openrouter import ChatOpenRouter
+    from src.shared.settings import Settings as _Settings
+    _settings = _Settings()
+
+    location = await _locate_symbol(entity_name)
+    source_context = ""
+    if location["file_path"]:
+        workspace = _os.getenv("WORKSPACE_PATH", "/workspace/repos")
+        if _os.path.exists(workspace):
+            for repo_dir in _os.listdir(workspace):
+                candidate = _os.path.join(workspace, repo_dir, location["file_path"])
+                if _os.path.exists(candidate):
+                    lines = open(candidate).readlines()
+                    start = max(0, location["start_line"] - 1)
+                    end = min(len(lines), start + 60)
+                    source_context = "".join(lines[start:end])
+                    break
+
+    prompt = f"Explain the implementation of `{entity_name}` in this codebase."
+    if source_context:
+        prompt += f"\n\nSource code:\n```python\n{source_context}\n```"
+
+    llm = ChatOpenRouter(
+        model=model or _settings.OPENROUTER_MODEL,
+        openrouter_api_key=_settings.OPENROUTER_API_KEY,
+        temperature=0,
+    )
+
+    response = await llm.ainvoke([
+        SystemMessage(content="You are a code analysis expert. Explain clearly and concisely."),
+        HumanMessage(content=prompt),
+    ])
+    return response.content
+
+
 class CodeAnalyzer:
     """Sends source code + graph context to an LLM for structured analysis."""
 
-    def __init__(self, settings: Settings | None = None, neo4j: Neo4jClient | None = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or Settings()
-        self._neo4j = neo4j
         self._llm: Any = None
 
     # -- LLM setup -----------------------------------------------------------
@@ -48,72 +115,6 @@ class CodeAnalyzer:
         except Exception as exc:
             logger.warning("LLM call failed: %s", exc)
             return f"Analysis unavailable: {exc}"
-
-    # -- graph helpers -------------------------------------------------------
-
-    async def _get_function_context(self, function_name: str) -> dict[str, Any]:
-        """Fetch graph context for a function from Neo4j."""
-        if self._neo4j is None:
-            return {}
-        try:
-            records = await self._neo4j.execute_query(
-                """
-                MATCH (f:Function {name: $name})
-                OPTIONAL MATCH (f)-[:CALLS]->(callee:Function)
-                OPTIONAL MATCH (caller:Function)-[:CALLS]->(f)
-                RETURN f.name AS name,
-                       f.path AS path,
-                       f.start_line AS start_line,
-                       f.end_line AS end_line,
-                       f.args AS args,
-                       f.return_type AS return_type,
-                       f.docstring AS docstring,
-                       collect(DISTINCT callee.name) AS callees,
-                       collect(DISTINCT caller.name) AS callers
-                """,
-                {"name": function_name},
-            )
-            return records[0] if records else {}
-        except Exception as exc:
-            logger.warning("Graph query failed for function %s: %s", function_name, exc)
-            return {}
-
-    async def _get_class_context(self, class_name: str) -> dict[str, Any]:
-        """Fetch graph context for a class from Neo4j."""
-        if self._neo4j is None:
-            return {}
-        try:
-            records = await self._neo4j.execute_query(
-                """
-                MATCH (c:Class {name: $name})
-                OPTIONAL MATCH (c)-[:HAS_METHOD]->(m:Function)
-                OPTIONAL MATCH (c)-[:INHERITS]->(base:Class)
-                RETURN c.name AS name,
-                       c.path AS path,
-                       c.start_line AS start_line,
-                       c.end_line AS end_line,
-                       c.docstring AS docstring,
-                       collect(DISTINCT m.name) AS methods,
-                       collect(DISTINCT base.name) AS bases
-                """,
-                {"name": class_name},
-            )
-            return records[0] if records else {}
-        except Exception as exc:
-            logger.warning("Graph query failed for class %s: %s", class_name, exc)
-            return {}
-
-    async def _get_entity_context(self, entity_name: str) -> dict[str, Any]:
-        """Fetch graph context for any entity (function or class)."""
-        ctx = await self._get_function_context(entity_name)
-        if ctx:
-            ctx["kind"] = "function"
-            return ctx
-        ctx = await self._get_class_context(entity_name)
-        if ctx:
-            ctx["kind"] = "class"
-            return ctx
-        return {}
 
     # -- public analysis methods ---------------------------------------------
 
@@ -160,31 +161,26 @@ class CodeAnalyzer:
         )
 
     async def analyze_function(self, source: str, function_name: str) -> dict[str, Any]:
-        """Analyze a function using LLM with graph context."""
-        context = await self._get_function_context(function_name)
-        prompt = self._build_function_prompt(source, context)
+        """Analyze a function using LLM."""
+        prompt = self._build_function_prompt(source, {})
         analysis = await self._invoke_llm(prompt)
         return {
             "function_name": function_name,
             "analysis": analysis,
-            "graph_context": context,
         }
 
     async def analyze_class(self, source: str, class_name: str) -> dict[str, Any]:
-        """Analyze a class using LLM with graph context."""
-        context = await self._get_class_context(class_name)
-        prompt = self._build_class_prompt(source, context)
+        """Analyze a class using LLM."""
+        prompt = self._build_class_prompt(source, {})
         analysis = await self._invoke_llm(prompt)
         return {
             "class_name": class_name,
             "analysis": analysis,
-            "graph_context": context,
         }
 
     async def explain_implementation(self, source: str, entity_name: str) -> dict[str, Any]:
         """Generate natural language explanation of code."""
-        context = await self._get_entity_context(entity_name)
-        prompt = self._build_explain_prompt(source, context)
+        prompt = self._build_explain_prompt(source, {"name": entity_name})
         explanation = await self._invoke_llm(prompt)
         return {
             "entity_name": entity_name,
