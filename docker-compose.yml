@@ -75,8 +75,12 @@ services:
       dockerfile: docker/Dockerfile.indexer
     ports:
       - "8011:8011"
+    volumes:
+      - gitnexus_workspace:/workspace/repos
     depends_on:
       neo4j:
+        condition: service_healthy
+      gitnexus-agent:
         condition: service_healthy
     env_file: .env
     healthcheck:
@@ -93,7 +97,7 @@ services:
     ports:
       - "8012:8012"
     depends_on:
-      neo4j:
+      gitnexus-agent:
         condition: service_healthy
     env_file: .env
     healthcheck:
@@ -136,6 +140,22 @@ services:
       retries: 3
       start_period: 15s
 
+  gitnexus-agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.gitnexus-agent
+    ports:
+      - "8015:8015"
+    volumes:
+      - gitnexus_workspace:/workspace/repos
+    env_file: .env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8015),2); s.close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   ui:
     build:
       context: .
@@ -157,3 +177,4 @@ services:
 volumes:
   neo4j_data:
   redis_data:
+  gitnexus_workspace:
