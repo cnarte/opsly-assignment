@@ -104,16 +104,28 @@ def test_collect_partial_results_empty():
 async def test_route_to_agents_handles_recursion_error():
     """route_to_agents should return a partial answer when GraphRecursionError is raised."""
     from langgraph.errors import GraphRecursionError
+    from langchain_core.messages import ToolMessage
+
+    mock_checkpoint = MagicMock()
+    mock_checkpoint.values = {
+        "messages": [
+            HumanMessage(content="how does routing work?"),
+            ToolMessage(content='{"symbol": "APIRouter"}', tool_call_id="t1"),
+        ]
+    }
 
     with patch("src.orchestrator.server._graph") as mock_graph, \
          patch("src.orchestrator.server._synthesize_partial", AsyncMock(return_value="Partial answer")) as mock_synth:
 
         mock_graph.ainvoke = AsyncMock(side_effect=GraphRecursionError("limit reached"))
+        mock_graph.aget_state = AsyncMock(return_value=mock_checkpoint)
 
-        # Import after patching so the module-level _graph is replaced
         from src.orchestrator import server as srv
         result = await srv.route_to_agents("how does routing work?", session_id="s1")
 
     assert "Partial answer" in result["final_response"]
     assert "partial exploration" in result["final_response"].lower()
     mock_synth.assert_awaited_once()
+    # Verify the ToolMessage content was passed to synthesize
+    call_args = mock_synth.call_args[0]
+    assert '{"symbol": "APIRouter"}' in call_args[0]

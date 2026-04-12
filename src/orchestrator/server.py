@@ -32,16 +32,19 @@ _stream_app = _FastAPI()
 @_stream_app.post("/stream")
 async def stream_chat(body: dict):
     """Stream ReAct events as Server-Sent Events."""
+    import uuid
     message = body.get("message", "")
     session_id = body.get("session_id", "")
     repo_id = body.get("repo_id", "")
     model = body.get("model", "")
+    thread_id = session_id or str(uuid.uuid4())
 
     state = _initial_state(message, session_id, repo_id, model)
+    config = {"recursion_limit": 50, "configurable": {"thread_id": thread_id}}
 
     async def _event_generator():
         try:
-            async for event in _graph.astream_events(state, config={"recursion_limit": 50}, version="v2"):
+            async for event in _graph.astream_events(state, config=config, version="v2"):
                 kind = event.get("event", "")
                 data = None
 
@@ -70,7 +73,9 @@ async def stream_chat(body: dict):
 
             yield f"data: {_json.dumps({'type': 'done'})}\n\n"
         except GraphRecursionError:
-            partial = _collect_partial_results(state["messages"])
+            checkpoint_tuple = await _graph.aget_state({"configurable": {"thread_id": thread_id}})
+            messages = checkpoint_tuple.values.get("messages", state["messages"]) if checkpoint_tuple else state["messages"]
+            partial = _collect_partial_results(messages)
             summary = await _synthesize_partial(partial, message, model)
             full = summary + "\n\n*(Based on partial exploration — ask a narrower question for more detail.)*"
             yield f"data: {_json.dumps({'type': 'partial', 'content': full})}\n\n"
@@ -135,12 +140,17 @@ async def route_to_agents(
     model: str = "",
 ) -> dict:
     """Run the full ReAct pipeline and return the final response."""
+    import uuid
     state = _initial_state(message, session_id, repo_id, model)
+    thread_id = session_id or str(uuid.uuid4())
+    config = {"recursion_limit": 50, "configurable": {"thread_id": thread_id}}
     try:
-        final_state = await _graph.ainvoke(state, config={"recursion_limit": 50})
+        final_state = await _graph.ainvoke(state, config=config)
     except GraphRecursionError:
         logger.warning("Recursion limit reached for query: %s", message[:100])
-        partial = _collect_partial_results(state["messages"])
+        checkpoint_tuple = await _graph.aget_state({"configurable": {"thread_id": thread_id}})
+        messages = checkpoint_tuple.values.get("messages", state["messages"]) if checkpoint_tuple else state["messages"]
+        partial = _collect_partial_results(messages)
         summary = await _synthesize_partial(partial, message, model)
         return {
             "final_response": summary + "\n\n*(Based on partial exploration — ask a narrower question for more detail.)*",

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph, START
 from langgraph.prebuilt import ToolNode
 
@@ -42,4 +43,4 @@ def build_orchestrator_graph() -> Any:
     graph.add_edge("tools", "agent")
     graph.add_edge("persist", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=MemorySaver())
