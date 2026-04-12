@@ -1,115 +1,45 @@
-"""LangGraph StateGraph for the Orchestrator Agent."""
-
+"""ReAct LangGraph for the orchestrator agent."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, StateGraph, START
+from langgraph.prebuilt import ToolNode
 
 from src.orchestrator.nodes import (
-    call_code_analyst,
-    call_graph_query,
-    call_indexer,
-    call_memory,
-    check_cache,
-    classify_query,
-    persist_interaction,
-    plan_agents,
-    rewrite_query,
-    synthesize,
+    build_tools,
+    inject_history,
+    persist_turn,
+    react_agent,
 )
 from src.orchestrator.state import OrchestratorState
 
-# ---------------------------------------------------------------------------
-# Routing helpers
-# ---------------------------------------------------------------------------
 
-_AGENT_NODE_MAP: dict[str, str] = {
-    "graph_query": "call_graph_query",
-    "code_analyst": "call_code_analyst",
-    "indexer":      "call_indexer",
-    "memory":       "call_memory",
-}
-
-
-def _route_after_cache(state: OrchestratorState) -> str:
-    """Skip the full pipeline on a cache hit — go straight to END (don't re-persist)."""
-    if state.get("final_response"):
-        return "__end__"
-    return "classify"
-
-
-def _route_from_plan(state: OrchestratorState) -> list[str]:
-    """Return the graph node names for every agent in the plan.
-
-    LangGraph will fan-out to all returned nodes in parallel.  If the plan is
-    empty we skip straight to synthesis.
-    """
-    plan = state.get("agent_plan", [])
-    nodes = [_AGENT_NODE_MAP[a] for a in plan if a in _AGENT_NODE_MAP]
-    return nodes if nodes else ["synthesize"]
-
-
-# ---------------------------------------------------------------------------
-# Graph construction
-# ---------------------------------------------------------------------------
+def _should_continue(state: OrchestratorState) -> Literal["tools", "persist"]:
+    """Route to tool executor if LLM made tool calls, else end the loop."""
+    messages = state.get("messages", [])
+    last = messages[-1] if messages else None
+    if last and getattr(last, "tool_calls", None):
+        return "tools"
+    return "persist"
 
 
 def build_orchestrator_graph() -> Any:
-    """Build and compile the orchestrator LangGraph."""
+    """Build and compile the ReAct orchestrator graph."""
+    tools = build_tools()
+    tool_node = ToolNode(tools)
 
     graph = StateGraph(OrchestratorState)
 
-    # -- nodes ---------------------------------------------------------------
-    graph.add_node("check_cache",        check_cache)
-    graph.add_node("rewrite",            rewrite_query)
-    graph.add_node("classify",           classify_query)
-    graph.add_node("plan",               plan_agents)
-    graph.add_node("call_graph_query",   call_graph_query)
-    graph.add_node("call_code_analyst",  call_code_analyst)
-    graph.add_node("call_indexer",       call_indexer)
-    graph.add_node("call_memory",        call_memory)
-    graph.add_node("synthesize",         synthesize)
-    graph.add_node("persist_interaction", persist_interaction)
+    graph.add_node("inject_history", inject_history)
+    graph.add_node("agent", react_agent)
+    graph.add_node("tools", tool_node)
+    graph.add_node("persist", persist_turn)
 
-    # -- edges ---------------------------------------------------------------
-    graph.set_entry_point("check_cache")
-
-    # If cache hit → go straight to persist (no-op) → END
-    # If cache miss → rewrite query → classify
-    graph.add_conditional_edges(
-        "check_cache",
-        _route_after_cache,
-        {
-            "classify":  "rewrite",
-            "__end__":   END,
-        },
-    )
-
-    graph.add_edge("rewrite", "classify")
-    graph.add_edge("classify", "plan")
-
-    # Conditional fan-out from plan to agent nodes (or straight to synthesize)
-    graph.add_conditional_edges(
-        "plan",
-        _route_from_plan,
-        {
-            "call_graph_query":  "call_graph_query",
-            "call_code_analyst": "call_code_analyst",
-            "call_indexer":      "call_indexer",
-            "call_memory":       "call_memory",
-            "synthesize":        "synthesize",
-        },
-    )
-
-    # All agent nodes converge on synthesize
-    graph.add_edge("call_graph_query",  "synthesize")
-    graph.add_edge("call_code_analyst", "synthesize")
-    graph.add_edge("call_indexer",      "synthesize")
-    graph.add_edge("call_memory",       "synthesize")
-
-    # Synthesize → persist → END
-    graph.add_edge("synthesize",          "persist_interaction")
-    graph.add_edge("persist_interaction", END)
+    graph.add_edge(START, "inject_history")
+    graph.add_edge("inject_history", "agent")
+    graph.add_conditional_edges("agent", _should_continue, {"tools": "tools", "persist": "persist"})
+    graph.add_edge("tools", "agent")
+    graph.add_edge("persist", END)
 
     return graph.compile()
