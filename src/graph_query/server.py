@@ -43,6 +43,31 @@ def _repo_args(base: dict, repo_id: str) -> dict:
     return {**base, "repo": repo_id} if repo_id else base
 
 
+def _parse_result(raw: dict) -> list[dict]:
+    """Parse LadybugDB cypher result (markdown table format) into list of dicts."""
+    if "error" in raw:
+        return []
+    markdown = raw.get("markdown", "")
+    if not markdown:
+        return []
+    lines = [l.strip() for l in markdown.strip().splitlines() if l.strip()]
+    if len(lines) < 3:
+        return []
+    headers = [h.strip() for h in lines[0].split("|") if h.strip()]
+    rows = []
+    for line in lines[2:]:  # skip header and separator
+        cells = [c.strip() for c in line.split("|") if c.strip() != ""]
+        if len(cells) == len(headers):
+            row: dict = {}
+            for h, c in zip(headers, cells):
+                try:
+                    row[h] = int(c)
+                except ValueError:
+                    row[h] = c
+            rows.append(row)
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # MCP tools (assignment-required names)
 # ---------------------------------------------------------------------------
@@ -79,28 +104,36 @@ async def get_dependents(entity_name: str, repo_id: str = "") -> dict:
 @mcp.tool()
 async def trace_imports(module_name: str, repo_id: str = "") -> dict:
     """Follow the import chain for a module."""
+    # LadybugDB: use n.name property match, not Cypher $params
     cypher = (
-        "MATCH path = (m {name: $name})-[:IMPORTS*1..5]->(t) "
-        "RETURN [node IN nodes(path) | node.name] AS chain LIMIT 20"
+        f'MATCH (m) WHERE m.name = "{module_name}" '
+        f'MATCH (m)-[*1..5]->(t) WHERE t.name IS NOT NULL '
+        f'RETURN t.name AS name, t.filePath AS file_path LIMIT 20'
     )
-    args = _repo_args({"query": cypher.replace("$name", f'"{module_name}"')}, repo_id)
-    result = await _call_gitnexus("cypher", args)
-    return {"module": module_name, "import_chains": result.get("results", []), "count": len(result.get("results", []))}
+    result = await _call_gitnexus("cypher", _repo_args({"query_str": cypher}, repo_id))
+    rows = _parse_result(result)
+    return {"module": module_name, "imports": rows, "count": len(rows)}
 
 
 @mcp.tool()
 async def find_related(entity_name: str, relationship_type: str, repo_id: str = "") -> dict:
     """Get entities related by a specific relationship type."""
-    cypher = f'MATCH (n {{name: "{entity_name}"}})-[r:{relationship_type}]->(t) RETURN n, r, t LIMIT 50'
-    result = await _call_gitnexus("cypher", _repo_args({"query": cypher}, repo_id))
-    return {"entity": entity_name, "relationship": relationship_type, "results": result.get("results", []), "count": len(result.get("results", []))}
+    cypher = (
+        f'MATCH (n) WHERE n.name = "{entity_name}" '
+        f'MATCH (n)-[r]->(t) WHERE t.name IS NOT NULL '
+        f'RETURN n.name AS source, t.name AS target, t.filePath AS file_path LIMIT 50'
+    )
+    result = await _call_gitnexus("cypher", _repo_args({"query_str": cypher}, repo_id))
+    rows = _parse_result(result)
+    return {"entity": entity_name, "relationship": relationship_type, "results": rows, "count": len(rows)}
 
 
 @mcp.tool()
 async def execute_query(cypher: str) -> dict:
     """Run a raw Cypher query (read-only, LadybugDB-sandboxed)."""
-    result = await _call_gitnexus("cypher", {"query": cypher})
-    return {"results": result.get("results", result), "count": len(result.get("results", []))}
+    result = await _call_gitnexus("cypher", {"query_str": cypher})
+    rows = _parse_result(result)
+    return {"results": rows, "count": len(rows), "raw": result}
 
 
 @mcp.tool()
@@ -117,11 +150,27 @@ async def analyze_impact(symbol_name: str, depth: int = 2, repo_id: str = "") ->
 
 @mcp.tool()
 async def list_entities(entity_type: str, limit: int = 50, repo_id: str = "") -> dict:
-    """List all entities of a given type via Cypher."""
-    label = entity_type.capitalize()
-    cypher = f"MATCH (n:{label}) WHERE n.name IS NOT NULL RETURN n.name AS name, n.file AS file_path LIMIT {min(limit, 200)}"
-    result = await _call_gitnexus("cypher", _repo_args({"query": cypher}, repo_id))
-    return {"entity_type": label, "entities": result.get("results", []), "count": len(result.get("results", []))}
+    """List all entities of a given type.
+
+    entity_type: Function, Class, File, Folder (LadybugDB id-prefix based).
+    """
+    # LadybugDB stores node types as id prefixes (e.g. "Function:my_func")
+    # Map common aliases to their prefix
+    _type_map = {
+        "function": "Function", "functions": "Function",
+        "class": "Class", "classes": "Class",
+        "file": "File", "files": "File",
+        "folder": "Folder", "module": "File",
+    }
+    prefix = _type_map.get(entity_type.lower(), entity_type.capitalize())
+    cap = min(limit, 200)
+    cypher = (
+        f'MATCH (n) WHERE n.id STARTS WITH "{prefix}:" AND n.name IS NOT NULL '
+        f'RETURN n.name AS name, n.filePath AS file_path LIMIT {cap}'
+    )
+    result = await _call_gitnexus("cypher", _repo_args({"query_str": cypher}, repo_id))
+    rows = _parse_result(result)
+    return {"entity_type": prefix, "entities": rows, "count": len(rows)}
 
 
 # ---------------------------------------------------------------------------

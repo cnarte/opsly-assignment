@@ -1,4 +1,4 @@
-"""Graph statistics endpoints — direct Neo4j queries."""
+"""Graph statistics endpoints — backed by gitnexus-agent (LadybugDB)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import logging
 from fastapi import APIRouter
 
 from src.shared.schemas import GraphStats
-from src.shared.neo4j_client import Neo4jClient
 from src.shared.settings import Settings
 from src.gateway.mcp_client import call_agent_tool
 
@@ -17,62 +16,75 @@ settings = Settings()
 
 router = APIRouter(tags=["graph"])
 
-_MEMORY_LABELS = {"MemoryInteraction", "MemoryFact"}
+
+def _parse_markdown_table(markdown: str) -> list[dict]:
+    """Parse a markdown table returned by gitnexus cypher into list of dicts."""
+    lines = [l.strip() for l in markdown.strip().splitlines() if l.strip()]
+    if len(lines) < 3:
+        return []
+    headers = [h.strip() for h in lines[0].split("|") if h.strip()]
+    rows = []
+    for line in lines[2:]:  # skip header and separator
+        cells = [c.strip() for c in line.split("|") if c.strip() != ""]
+        if len(cells) == len(headers):
+            row = {}
+            for h, c in zip(headers, cells):
+                try:
+                    row[h] = int(c)
+                except ValueError:
+                    row[h] = c
+            rows.append(row)
+    return rows
+
+
+async def _gitnexus_cypher(query: str) -> list[dict]:
+    """Run a Cypher query via gitnexus-agent and return parsed result rows."""
+    raw = await call_agent_tool(settings.GITNEXUS_PORT, "cypher", {"query_str": query})
+    if "error" in raw:
+        logger.warning("gitnexus cypher error: %s", raw["error"])
+        return []
+    markdown = raw.get("markdown", "")
+    if markdown:
+        return _parse_markdown_table(markdown)
+    return []
+
+
+# Node types known to LadybugDB (id prefix → display label)
+_NODE_TYPES = [
+    ("Function", "Function"),
+    ("Class", "Class"),
+    ("File", "File"),
+    ("Folder", "Folder"),
+    ("Process", "Process"),
+    ("Cluster", "Cluster"),
+]
 
 
 @router.get("/api/graph/statistics", response_model=GraphStats)
 async def graph_statistics() -> GraphStats:
-    """Return code knowledge-graph statistics (excludes memory labels)."""
-    client = Neo4jClient(settings)
+    """Return knowledge-graph statistics from LadybugDB via gitnexus-agent."""
     try:
-        await client.connect()
+        node_rows = await _gitnexus_cypher("MATCH (n) RETURN count(n) AS cnt")
+        total_nodes = node_rows[0].get("cnt", 0) if node_rows else 0
 
-        # Total node count — exclude memory-layer labels
-        node_result = await client.execute_query(
-            "MATCH (n) WHERE NOT n:MemoryInteraction AND NOT n:MemoryFact "
-            "RETURN count(n) AS cnt"
-        )
-        total_nodes = node_result[0]["cnt"] if node_result else 0
+        rel_rows = await _gitnexus_cypher("MATCH ()-[r]->() RETURN count(r) AS cnt")
+        total_rels = rel_rows[0].get("cnt", 0) if rel_rows else 0
 
-        # Total relationship count — exclude memory-layer nodes at either end
-        rel_result = await client.execute_query(
-            "MATCH ()-[r]->() "
-            "WHERE NOT startNode(r):MemoryInteraction AND NOT startNode(r):MemoryFact "
-            "  AND NOT endNode(r):MemoryInteraction AND NOT endNode(r):MemoryFact "
-            "RETURN count(r) AS cnt"
-        )
-        total_rels = rel_result[0]["cnt"] if rel_result else 0
-
-        # Per-label counts — try APOC first, fall back to pure Cypher
-        label_result: list[dict] = []
-        try:
-            label_result = await client.execute_query(
-                "CALL db.labels() YIELD label "
-                "CALL apoc.cypher.run('MATCH (n:`' + label + '`) RETURN count(n) AS cnt', {}) "
-                "YIELD value "
-                "RETURN label, value.cnt AS cnt"
+        # Count each node type using id-prefix filter (LadybugDB lacks split/type functions)
+        import asyncio
+        async def _count(prefix: str) -> int:
+            rows = await _gitnexus_cypher(
+                f'MATCH (n) WHERE n.id STARTS WITH "{prefix}:" RETURN count(n) AS cnt'
             )
-        except Exception:
-            label_result = []
+            return rows[0].get("cnt", 0) if rows else 0
 
-        if not label_result:
-            label_result = await client.execute_query(
-                "MATCH (n) WITH labels(n) AS lbls UNWIND lbls AS label "
-                "RETURN label, count(*) AS cnt"
-            )
-
-        labels = {
-            row["label"]: row["cnt"]
-            for row in label_result
-            if row["label"] not in _MEMORY_LABELS
-        }
+        counts = await asyncio.gather(*[_count(p) for p, _ in _NODE_TYPES])
+        labels = {label: cnt for (_, label), cnt in zip(_NODE_TYPES, counts) if cnt > 0}
 
         return GraphStats(nodes=total_nodes, relationships=total_rels, labels=labels)
     except Exception as exc:
-        logger.error("Failed to query graph statistics: %s", exc)
+        logger.error("Failed to query gitnexus statistics: %s", exc)
         return GraphStats(nodes=0, relationships=0, labels={})
-    finally:
-        await client.close()
 
 
 @router.get("/api/graph/repos")
