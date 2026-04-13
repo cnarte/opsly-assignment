@@ -153,8 +153,16 @@ async def route_to_agents(
         messages = checkpoint_tuple.values.get("messages", state["messages"]) if checkpoint_tuple else state["messages"]
         partial = _collect_partial_results(messages)
         summary = await _synthesize_partial(partial, message, model)
+        final_response = summary + "\n\n*(Based on partial exploration — ask a narrower question for more detail.)*"
+        if session_id:
+            await _call_mcp_agent(
+                "memory", settings.MEMORY_PORT,
+                "store_interaction",
+                {"session_id": session_id, "query": message, "response": final_response},
+                timeout=10,
+            )
         return {
-            "final_response": summary + "\n\n*(Based on partial exploration — ask a narrower question for more detail.)*",
+            "final_response": final_response,
             "session_id": session_id,
             "agent_results": {},
             "tool_plan": [],

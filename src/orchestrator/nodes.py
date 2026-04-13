@@ -75,7 +75,8 @@ async def _call_mcp_agent(
 ) -> dict[str, Any]:
     """Call an MCP tool via streamable-http transport."""
     import asyncio
-    from mcp.client.streamable_http import streamablehttp_client
+    import httpx
+    from mcp.client.streamable_http import streamable_http_client
     from mcp import ClientSession
 
     _PORT_TO_SERVICE: dict[int, str] = {
@@ -93,16 +94,20 @@ async def _call_mcp_agent(
 
     try:
         async with asyncio.timeout(timeout_s):
-            async with streamablehttp_client(url) as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    result = await session.call_tool(tool_name, tool_args)
-                    if result.content:
-                        try:
-                            return json.loads(result.content[0].text)
-                        except (json.JSONDecodeError, TypeError):
-                            return {"result": result.content[0].text}
-                    return {}
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0, read=timeout_s),
+                follow_redirects=True,
+            ) as http_client:
+                async with streamable_http_client(url, http_client=http_client) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        result = await session.call_tool(tool_name, tool_args)
+                        if result.content:
+                            try:
+                                return json.loads(result.content[0].text)
+                            except (json.JSONDecodeError, TypeError):
+                                return {"result": result.content[0].text}
+                        return {}
     except Exception as exc:
         logger.warning("MCP call %s/%s failed: %s", agent_name, tool_name, exc)
         return {"error": f"{agent_name}/{tool_name} failed: {exc}"}
