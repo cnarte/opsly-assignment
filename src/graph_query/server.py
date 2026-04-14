@@ -7,8 +7,9 @@ import os
 import re
 from typing import Any
 
+import httpx
 from mcp.server.fastmcp import FastMCP
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 from mcp import ClientSession
 
 from src.shared.settings import Settings
@@ -39,16 +40,35 @@ async def _call_gitnexus(tool: str, args: dict) -> dict:
     """Call a tool on the gitnexus-agent MCP server."""
     host = "gitnexus-agent" if os.path.exists("/.dockerenv") else "localhost"
     url = f"http://{host}:{settings.GITNEXUS_PORT}/mcp"
-    async with streamablehttp_client(url) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            result = await session.call_tool(tool, args)
-            if result.content:
-                try:
-                    return json.loads(result.content[0].text)
-                except (json.JSONDecodeError, TypeError):
-                    return {"result": result.content[0].text}
-            return {}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=60.0), follow_redirects=True) as http_client:
+        async with streamable_http_client(url, http_client=http_client) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(tool, args)
+                if result.content:
+                    try:
+                        parsed = json.loads(result.content[0].text)
+                        # Unwrap double-serialised responses: {"result": "<json string>"}
+                        if isinstance(parsed, dict) and list(parsed.keys()) == ["result"] and isinstance(parsed["result"], str):
+                            inner = parsed["result"]
+                            try:
+                                return json.loads(inner)
+                            except json.JSONDecodeError:
+                                # Response truncated by MCP transport — try progressively
+                                # smaller slices at brace/bracket boundaries
+                                for pct in (0.9, 0.75, 0.5):
+                                    candidate = inner[:int(len(inner) * pct)]
+                                    last_brace = max(candidate.rfind('}'), candidate.rfind(']'))
+                                    if last_brace > 0:
+                                        try:
+                                            return json.loads(candidate[:last_brace + 1])
+                                        except json.JSONDecodeError:
+                                            pass
+                                return {"raw_truncated": inner[:4000]}
+                        return parsed
+                    except (json.JSONDecodeError, TypeError):
+                        return {"result": result.content[0].text}
+                return {}
 
 
 def _repo_args(base: dict, repo_id: str) -> dict:
@@ -88,7 +108,7 @@ def _parse_result(raw: dict) -> list[dict]:
 @mcp.tool()
 async def find_entity(name: str, entity_type: str = "", repo_id: str = "") -> dict:
     """Locate a class, function, or module by name using hybrid search."""
-    return await _call_gitnexus("query", _repo_args({"query": name}, repo_id))
+    return await _call_gitnexus("query", _repo_args({"q": name}, repo_id))
 
 
 @mcp.tool()
@@ -156,8 +176,38 @@ async def get_symbol_context(symbol_name: str, repo_id: str = "") -> dict:
 
 @mcp.tool()
 async def analyze_impact(symbol_name: str, depth: int = 2, repo_id: str = "") -> dict:
-    """Blast-radius analysis: what would break if this symbol changed."""
-    return await _call_gitnexus("impact", _repo_args({"symbol": symbol_name}, repo_id))
+    """Blast-radius analysis: what would break if this symbol changed.
+    Returns impacted entities grouped by depth level (capped at 20 per level).
+    """
+    safe_name = symbol_name.replace('"', '\\"').replace("\\", "\\\\")
+    cap_depth = max(1, min(int(depth), 4))
+    cypher = (
+        f'MATCH (target) WHERE target.name = "{safe_name}" '
+        f'WITH target LIMIT 1 '
+        f'MATCH path = (target)<-[*1..{cap_depth}]-(dependent) '
+        f'WHERE dependent.name IS NOT NULL AND dependent.id <> target.id '
+        f'RETURN DISTINCT dependent.name AS name, dependent.filePath AS file_path, '
+        f'dependent.id AS id, length(path) AS depth_level '
+        f'ORDER BY depth_level, name LIMIT 100'
+    )
+    result = await _call_gitnexus("cypher", _repo_args({"query_str": cypher}, repo_id))
+    rows = _parse_result(result)
+
+    by_depth: dict = {}
+    for row in rows:
+        lvl = str(row.get("depth_level", 1))
+        if lvl not in by_depth:
+            by_depth[lvl] = []
+        if len(by_depth[lvl]) < 20:
+            by_depth[lvl].append({"name": row.get("name"), "file_path": row.get("file_path"), "id": row.get("id")})
+
+    return {
+        "symbol": symbol_name,
+        "impacted_count": len(rows),
+        "depth": cap_depth,
+        "by_depth": by_depth,
+        "note": "Showing up to 20 items per depth level, max 100 total.",
+    }
 
 
 @mcp.tool()
@@ -189,28 +239,33 @@ async def list_entities_tree(entity_type: str, repo_id: str = "") -> dict:
     """
     prefix_raw = _ENTITY_TYPE_MAP.get(entity_type.lower(), entity_type.capitalize())
     prefix = prefix_raw if _SAFE_PREFIX.match(prefix_raw) else "Function"
+    # Aggregate in the DB — one row per file with count, avoids transmitting thousands of rows
     cypher = (
         f'MATCH (n) WHERE n.id STARTS WITH "{prefix}:" AND n.name IS NOT NULL '
-        f'RETURN n.name AS name, n.filePath AS file_path LIMIT 5000'
+        f'WITH n.filePath AS file_path, count(*) AS cnt '
+        f'RETURN file_path, cnt ORDER BY file_path LIMIT 500'
     )
     result = await _call_gitnexus("cypher", _repo_args({"query_str": cypher}, repo_id))
     rows = _parse_result(result)
 
     tree: dict[str, dict] = {}
+    total = 0
     for row in rows:
         fp: str = row.get("file_path") or ""
+        cnt: int = row.get("cnt", 1)
+        total += cnt
         parts = fp.split("/")
         folder = parts[0] if len(parts) > 1 else "_root"
         filename = parts[-1] or "_unknown"
 
         if folder not in tree:
             tree[folder] = {"count": 0, "files": {}}
-        tree[folder]["count"] += 1
-        tree[folder]["files"][filename] = tree[folder]["files"].get(filename, 0) + 1
+        tree[folder]["count"] += cnt
+        tree[folder]["files"][filename] = tree[folder]["files"].get(filename, 0) + cnt
 
     return {
         "entity_type": prefix,
-        "total": len(rows),
+        "total": total,
         "tree": tree,
     }
 

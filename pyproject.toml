@@ -21,6 +21,7 @@ dependencies = [
     "httpx>=0.27",
     "libcst",
     "pydantic-settings",
+    "langfuse>=3.0,<4",
 ]
 
 [project.optional-dependencies]

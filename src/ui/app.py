@@ -50,14 +50,20 @@ LABEL_COLORS = {
 }
 
 OPENROUTER_MODELS = [
-    ("Server default",                         ""),
-    ("Nemotron 3 Super 120B (free)",           "nvidia/nemotron-3-super-120b-a12b:free"),
-    ("Qwen 2.5 72B Instruct (free)",           "qwen/qwen-2.5-72b-instruct:free"),
-    ("Llama 3.3 70B Instruct (free)",          "meta-llama/llama-3.3-70b-instruct:free"),
-    ("DeepSeek Chat v3 (free)",                "deepseek/deepseek-chat:free"),
-    ("Gemini 2.0 Flash Exp (free)",            "google/gemini-2.0-flash-exp:free"),
-    ("Mistral 7B Instruct (free)",             "mistralai/mistral-7b-instruct:free"),
-    ("Other…",                                 "__custom__"),
+    # Paid models via OpenRouter (fast, requires credits)
+    ("Server default (GPT-OSS 20B — fast)",     ""),
+    ("Claude Sonnet 4.6 (fast, paid)",          "anthropic/claude-sonnet-4-6"),
+    ("Claude Haiku 4.5 (fastest, paid)",        "anthropic/claude-haiku-4-5-20251001"),
+    # Free models with tool-use support — fast
+    ("GPT-OSS 20B (fast, free)",                "openai/gpt-oss-20b:free"),
+    ("Nemotron Nano 9B (fastest, free)",        "nvidia/nemotron-nano-9b-v2:free"),
+    ("Nemotron Nano 12B (fast, free)",          "nvidia/nemotron-nano-12b-v2-vl:free"),
+    ("Nemotron Nano 30B (medium, free)",        "nvidia/nemotron-3-nano-30b-a3b:free"),
+    # Free models with tool-use support — slower
+    ("Llama 3.3 70B (slow, free)",              "meta-llama/llama-3.3-70b-instruct:free"),
+    ("GPT-OSS 120B (slow, free)",               "openai/gpt-oss-120b:free"),
+    ("Nemotron 3 120B (very slow, free)",       "nvidia/nemotron-3-super-120b-a12b:free"),
+    ("Other…",                                  "__custom__"),
 ]
 
 
@@ -475,6 +481,7 @@ with chat_col:
             "timestamp": time.strftime("%H:%M:%S"),
             "status": "running",
             "agents": [],
+            "tool_calls": [],   # list of {tool, args, result, duration_ms}
         }
         st.session_state.agent_activities.insert(0, activity)
 
@@ -497,6 +504,7 @@ with chat_col:
                 tool_placeholder = st.empty()
                 accumulated = ""
                 active_tools: list[str] = []
+                _pending_tool: dict | None = None   # tool_call waiting for its result
 
                 try:
                     with httpx.stream(
@@ -523,11 +531,29 @@ with chat_col:
                             elif etype == "tool_call":
                                 tool_name = event.get("tool", "")
                                 active_tools.append(tool_name)
+                                _pending_tool = {
+                                    "tool": tool_name,
+                                    "args": event.get("args", ""),
+                                    "result": None,
+                                    "ts": time.strftime("%H:%M:%S"),
+                                }
+                                activity["tool_calls"].append(_pending_tool)
                                 tool_placeholder.caption(
                                     " · ".join(f"🔧 {t}" for t in active_tools[-3:])
                                 )
                             elif etype == "tool_result":
-                                pass
+                                # Attach result to the last pending tool call
+                                if _pending_tool is not None:
+                                    _pending_tool["result"] = event.get("result", "")
+                                    _pending_tool = None
+                            elif etype == "retry":
+                                reason = event.get("reason", "")
+                                wait = event.get("wait", 0)
+                                attempt = event.get("attempt", 1)
+                                label = "Rate limited" if reason == "rate_limit" else "Timeout"
+                                tool_placeholder.caption(
+                                    f"⏳ {label} — retrying in {wait}s (attempt {attempt}/4)…"
+                                )
                             elif etype == "done":
                                 break
                             elif etype == "error":
@@ -603,10 +629,12 @@ with panel_col:
         else:
             for i, act in enumerate(st.session_state.agent_activities[:10]):
                 status_icon = "🟢" if act["status"] == "done" else "🔄"
-                with st.expander(
-                    f'{status_icon} {act["timestamp"]} — {act["query"][:45]}...',
-                    expanded=(i == 0),
-                ):
+                query_preview = act["query"][:40] + ("…" if len(act["query"]) > 40 else "")
+                tool_count = len(act.get("tool_calls", []))
+                label = f'{status_icon} {act["timestamp"]} — {query_preview}'
+                if tool_count:
+                    label += f'  `{tool_count} tools`'
+                with st.expander(label, expanded=(i == 0)):
                     # Agent badges
                     if act.get("agents"):
                         st.markdown("**Agents involved:**")
@@ -631,6 +659,39 @@ with panel_col:
                             st.markdown(
                                 f"**Entities:** {', '.join(f'`{e}`' for e in entities)}"
                             )
+
+                    # Tool call timeline
+                    tool_calls = act.get("tool_calls", [])
+                    if tool_calls:
+                        st.markdown("---")
+                        st.markdown("**Tool calls:**")
+                        for j, tc in enumerate(tool_calls):
+                            tool_icon = "🔧"
+                            result_icon = "✅" if tc.get("result") is not None else "⏳"
+                            with st.expander(
+                                f"{result_icon} {tool_icon} `{tc['tool']}` — {tc.get('ts', '')}",
+                                expanded=False,
+                            ):
+                                if tc.get("args"):
+                                    st.markdown("**Input:**")
+                                    try:
+                                        import json as _j
+                                        args_parsed = _j.loads(tc["args"]) if isinstance(tc["args"], str) else tc["args"]
+                                        st.json(args_parsed)
+                                    except Exception:
+                                        st.code(str(tc["args"])[:400], language=None)
+                                if tc.get("result") is not None:
+                                    st.markdown("**Output:**")
+                                    result_str = str(tc["result"])
+                                    try:
+                                        import json as _j
+                                        result_parsed = _j.loads(result_str) if result_str.startswith(("{", "[")) else None
+                                        if result_parsed:
+                                            st.json(result_parsed)
+                                        else:
+                                            st.code(result_str[:600], language=None)
+                                    except Exception:
+                                        st.code(result_str[:600], language=None)
 
     with tab_graph:
         graph_data = st.session_state.last_graph_data

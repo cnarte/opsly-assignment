@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from langgraph.errors import GraphRecursionError
 from src.orchestrator.graph import build_orchestrator_graph
-from src.orchestrator.nodes import _get_llm, _call_mcp_agent
+from src.orchestrator.nodes import _get_llm, _call_mcp_agent, get_langfuse_callback
 from src.orchestrator.prompts import RESPONSE_SYNTHESIS_PROMPT
 from src.orchestrator.state import OrchestratorState
 from src.shared.settings import Settings
@@ -40,24 +40,53 @@ async def stream_chat(body: dict):
     thread_id = session_id or str(uuid.uuid4())
 
     state = _initial_state(message, session_id, repo_id, model)
-    config = {"recursion_limit": 10, "configurable": {"thread_id": thread_id}}
+    lf_cb = get_langfuse_callback(session_id=session_id)
+    callbacks = [lf_cb] if lf_cb else []
+    config = {"recursion_limit": 10, "configurable": {"thread_id": thread_id}, "callbacks": callbacks}
 
     async def _event_generator():
+        logger.info("stream_chat starting: session=%s msg=%.60s", session_id, message)
         try:
+            streamed_any_token = False
             async for event in _graph.astream_events(state, config=config, version="v2"):
                 kind = event.get("event", "")
+                node = event.get("metadata", {}).get("langgraph_node", "")
                 data = None
 
-                if kind == "on_chat_model_stream":
+                if kind == "on_chat_model_stream" and node == "agent":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
-                        data = {"type": "token", "content": chunk.content}
+                        content = chunk.content
+                        # Handle both string and list-of-blocks content formats
+                        if isinstance(content, list):
+                            content = "".join(
+                                b.get("text", "") if isinstance(b, dict) else str(b)
+                                for b in content
+                            )
+                        if content:
+                            streamed_any_token = True
+                            data = {"type": "token", "content": content}
+
+                elif kind == "on_chat_model_end" and node == "agent" and not streamed_any_token:
+                    # Fallback: model didn't stream — extract content from completed response
+                    output = event.get("data", {}).get("output")
+                    if output:
+                        content = getattr(output, "content", "")
+                        if isinstance(content, list):
+                            content = "".join(
+                                b.get("text", "") if isinstance(b, dict) else str(b)
+                                for b in content
+                            )
+                        # Only emit if this was a final answer (no tool_calls)
+                        if content and not getattr(output, "tool_calls", None):
+                            streamed_any_token = True
+                            data = {"type": "token", "content": content}
 
                 elif kind == "on_tool_start":
                     data = {
                         "type": "tool_call",
                         "tool": event.get("name", ""),
-                        "args": _json.dumps(event.get("data", {}).get("input", {}), default=str)[:200],
+                        "args": _json.dumps(event.get("data", {}).get("input", {}), default=str)[:300],
                     }
 
                 elif kind == "on_tool_end":
@@ -65,14 +94,21 @@ async def stream_chat(body: dict):
                     data = {
                         "type": "tool_result",
                         "tool": event.get("name", ""),
-                        "summary": str(output)[:200],
+                        "result": str(output)[:500],
                     }
+
+                elif kind == "on_custom_event":
+                    payload = event.get("data", {})
+                    if isinstance(payload, dict) and payload.get("type") == "retry":
+                        data = payload  # forward retry event directly
 
                 if data:
                     yield f"data: {_json.dumps(data)}\n\n"
 
+            logger.info("stream_chat done: session=%s streamed_tokens=%s", session_id, streamed_any_token)
             yield f"data: {_json.dumps({'type': 'done'})}\n\n"
         except GraphRecursionError:
+            logger.warning("stream_chat recursion limit: session=%s", session_id)
             checkpoint_tuple = await _graph.aget_state({"configurable": {"thread_id": thread_id}})
             messages = checkpoint_tuple.values.get("messages", state["messages"]) if checkpoint_tuple else state["messages"]
             partial = _collect_partial_results(messages)
@@ -81,6 +117,7 @@ async def stream_chat(body: dict):
             yield f"data: {_json.dumps({'type': 'partial', 'content': full})}\n\n"
             yield f"data: {_json.dumps({'type': 'done'})}\n\n"
         except Exception as exc:
+            logger.exception("stream_chat error: session=%s error=%s", session_id, exc)
             yield f"data: {_json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
 
     return _StreamingResponse(_event_generator(), media_type="text/event-stream")
@@ -144,7 +181,9 @@ async def route_to_agents(
     import uuid
     state = _initial_state(message, session_id, repo_id, model)
     thread_id = session_id or str(uuid.uuid4())
-    config = {"recursion_limit": 10, "configurable": {"thread_id": thread_id}}
+    lf_cb = get_langfuse_callback(session_id=session_id)
+    callbacks = [lf_cb] if lf_cb else []
+    config = {"recursion_limit": 10, "configurable": {"thread_id": thread_id}, "callbacks": callbacks}
     try:
         final_state = await _graph.ainvoke(state, config=config)
     except GraphRecursionError:

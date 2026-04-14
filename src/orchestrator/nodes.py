@@ -8,6 +8,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openrouter import ChatOpenRouter
+from langgraph.config import get_stream_writer
 
 from src.orchestrator.prompts import REACT_SYSTEM_PROMPT, RESPONSE_SYNTHESIS_PROMPT
 from src.orchestrator.state import OrchestratorState
@@ -15,6 +16,30 @@ from src.shared.settings import Settings
 
 logger = logging.getLogger(__name__)
 settings = Settings()
+
+
+# ---------------------------------------------------------------------------
+# Langfuse tracing helper
+# ---------------------------------------------------------------------------
+
+
+def get_langfuse_callback(session_id: str = "", user_id: str = ""):
+    """Return a Langfuse LangChain callback handler, or None if not configured."""
+    if not settings.LANGFUSE_PUBLIC_KEY or not settings.LANGFUSE_SECRET_KEY:
+        return None
+    try:
+        from langfuse.callback import CallbackHandler  # langfuse >= 3.x
+        host = settings.LANGFUSE_HOST or settings.LANGFUSE_BASE_URL
+        return CallbackHandler(
+            public_key=settings.LANGFUSE_PUBLIC_KEY,
+            secret_key=settings.LANGFUSE_SECRET_KEY,
+            host=host,
+            session_id=session_id or None,
+            user_id=user_id or None,
+        )
+    except Exception:
+        logger.warning("Langfuse callback unavailable — tracing disabled", exc_info=False)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +53,7 @@ def _get_llm(model: str = "") -> ChatOpenRouter:
         model=model or settings.OPENROUTER_MODEL,
         openrouter_api_key=settings.OPENROUTER_API_KEY,
         temperature=0,
+        streaming=True,
     )
 
 
@@ -90,7 +116,10 @@ async def _call_mcp_agent(
 
     host = _PORT_TO_SERVICE.get(port, "localhost") if os.path.exists("/.dockerenv") else "localhost"
     url = f"http://{host}:{port}/mcp"
-    timeout_s = timeout or getattr(settings, "MCP_CALL_TIMEOUT_S", 30)
+    # Default 90s — graph-query calls gitnexus-agent with a 60s read timeout, so
+    # we need at least 90s here to avoid closing the connection while graph-query
+    # is still waiting for gitnexus (which causes the ASGI ClosedResourceError).
+    timeout_s = timeout or getattr(settings, "MCP_CALL_TIMEOUT_S", 90)
 
     try:
         async with asyncio.timeout(timeout_s):
@@ -146,8 +175,14 @@ def _make_mcp_tool(agent: str, port: int, name: str, description: str, schema: d
     )
 
 
+_tools_cache: dict[str, list] = {}
+
+
 def build_tools(repo_id: str = "", model: str = "") -> list:
-    """Build the full tool list for the ReAct agent."""
+    """Build the full tool list for the ReAct agent (cached per repo_id)."""
+    cache_key = repo_id or "__default__"
+    if cache_key in _tools_cache:
+        return _tools_cache[cache_key]
     tools = []
 
     gq_port = settings.GRAPH_QUERY_PORT
@@ -197,6 +232,7 @@ def build_tools(repo_id: str = "", model: str = "") -> list:
     ]:
         tools.append(_make_mcp_tool("code_analyst", ca_port, name, desc, schema))
 
+    _tools_cache[cache_key] = tools
     return tools
 
 
@@ -237,6 +273,7 @@ async def inject_history(state: OrchestratorState) -> dict:
 
 async def react_agent(state: OrchestratorState) -> dict:
     """Single ReAct step: LLM decides next tool call or final answer."""
+    import asyncio as _asyncio
     model = state.get("model", "")
     repo_id = state.get("repo_id", "")
 
@@ -244,7 +281,44 @@ async def react_agent(state: OrchestratorState) -> dict:
     llm = _get_llm(model).bind_tools(tools)
 
     messages = [SystemMessage(content=REACT_SYSTEM_PROMPT)] + list(state.get("messages", []))
-    response = await llm.ainvoke(messages)
+
+    # Retry up to 4 times on transient errors from OpenRouter free models:
+    #   524/timeout → short backoff (1s, 2s, 4s)
+    #   429 rate-limit → longer backoff (10s, 20s, 40s)
+    last_exc = None
+    for attempt in range(4):
+        try:
+            response = await llm.ainvoke(messages)
+            break
+        except Exception as exc:
+            err = str(exc)
+            is_timeout = "524" in err or "timeout" in err.lower() or "timed out" in err.lower()
+            is_rate_limit = "429" in err or "rate limit" in err.lower() or "too many requests" in err.lower()
+            if is_rate_limit:
+                last_exc = exc
+                wait = 10 * (2 ** attempt)  # 10s, 20s, 40s, 80s
+                logger.warning("LLM rate-limited (429), retrying in %ds [attempt %d/4]: %s", wait, attempt + 1, err[:120])
+                try:
+                    writer = get_stream_writer()
+                    writer({"type": "retry", "reason": "rate_limit", "wait": wait, "attempt": attempt + 1})
+                except Exception:
+                    pass
+                await _asyncio.sleep(wait)
+                continue
+            elif is_timeout:
+                last_exc = exc
+                wait = 2 ** attempt  # 1s, 2s, 4s, 8s
+                logger.warning("LLM timeout, retrying in %ds [attempt %d/4]: %s", wait, attempt + 1, err[:120])
+                try:
+                    writer = get_stream_writer()
+                    writer({"type": "retry", "reason": "timeout", "wait": wait, "attempt": attempt + 1})
+                except Exception:
+                    pass
+                await _asyncio.sleep(wait)
+                continue
+            raise
+    else:
+        raise last_exc
     return {"messages": [response]}
 
 

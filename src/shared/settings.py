@@ -16,7 +16,9 @@ class Settings(BaseSettings):
 
     # LLM / OpenRouter
     OPENROUTER_API_KEY: str = ""
-    OPENROUTER_MODEL: str = "nvidia/nemotron-3-super-120b-a12b:free"
+    # Llama 3.1 8B is ~15x faster than Nemotron 120B on OpenRouter free tier
+    # (3-8s vs 60-90s per call). Override via OPENROUTER_MODEL env var or UI dropdown.
+    OPENROUTER_MODEL: str = "meta-llama/llama-3.1-8b-instruct:free"
 
     # OpenAI Embeddings
     OPENAI_API_KEY: str = ""
@@ -49,6 +51,13 @@ class Settings(BaseSettings):
     # MCP client behaviour
     MCP_CALL_TIMEOUT_S: int = 120
     MCP_CALL_RETRIES: int = 1
+
+    # Langfuse tracing (optional — leave blank to disable)
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    # Accept both LANGFUSE_BASE_URL (Langfuse's own name) and LANGFUSE_HOST
+    LANGFUSE_BASE_URL: str = "https://cloud.langfuse.com"
+    LANGFUSE_HOST: str = ""  # alias — if set, overrides LANGFUSE_BASE_URL
 
     # General
     LOG_LEVEL: str = "INFO"
