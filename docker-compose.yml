@@ -63,6 +63,8 @@ services:
       # Retries set to 0 to avoid 2×timeout stacking on long compare_implementations calls
       MCP_CALL_TIMEOUT_S: "300"
       MCP_CALL_RETRIES: "0"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8010),2); s.close()"]
       interval: 10s
@@ -115,6 +117,8 @@ services:
     ports:
       - "8013:8013"
     env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8013),2); s.close()"]
       interval: 10s

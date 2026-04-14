@@ -8,6 +8,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openrouter import ChatOpenRouter
+from langchain_ollama import ChatOllama
 from langgraph.config import get_stream_writer
 
 from src.orchestrator.prompts import REACT_SYSTEM_PROMPT, RESPONSE_SYNTHESIS_PROMPT
@@ -47,10 +48,22 @@ def get_langfuse_callback(session_id: str = "", user_id: str = ""):
 # ---------------------------------------------------------------------------
 
 
-def _get_llm(model: str = "") -> ChatOpenRouter:
-    """Return a ChatOpenRouter, using model override when provided."""
+def _get_llm(model: str = ""):
+    """Return a ChatOpenRouter or ChatOllama, using model override when provided.
+
+    Model IDs starting with 'ollama:' are routed to ChatOllama (local).
+    All others use ChatOpenRouter (OpenRouter API).
+    """
+    resolved = model or settings.OPENROUTER_MODEL
+    if resolved.startswith("ollama:"):
+        ollama_model = resolved.removeprefix("ollama:")
+        return ChatOllama(
+            model=ollama_model,
+            base_url=settings.OLLAMA_BASE_URL,
+            temperature=0,
+        )
     return ChatOpenRouter(
-        model=model or settings.OPENROUTER_MODEL,
+        model=resolved,
         openrouter_api_key=settings.OPENROUTER_API_KEY,
         temperature=0,
         streaming=True,

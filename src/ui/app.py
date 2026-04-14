@@ -49,17 +49,27 @@ LABEL_COLORS = {
     "Docstring": "#EC4899",
 }
 
-OPENROUTER_MODELS = [
-    # Paid models via OpenRouter (fast, requires credits)
-    ("Server default (GPT-OSS 20B — fast)",     ""),
+AVAILABLE_MODELS = [
+    # Server default
+    ("Server default (env OPENROUTER_MODEL)",   ""),
+    # Ollama models (local, no rate limits)
+    ("── Ollama (local) ──",                    None),
+    ("Ollama: nemotron-cascade-2 (default)",    "ollama:nemotron-cascade-2"),
+    ("Ollama: llama3.2 (3B, fast)",             "ollama:llama3.2"),
+    ("Ollama: llama3.1:8b",                     "ollama:llama3.1:8b"),
+    ("Ollama: mistral",                         "ollama:mistral"),
+    ("Ollama: deepseek-r1:8b",                  "ollama:deepseek-r1:8b"),
+    ("Ollama: custom…",                         "__ollama_custom__"),
+    # OpenRouter models (paid, requires credits)
+    ("── OpenRouter (paid) ──",                 None),
     ("Claude Sonnet 4.6 (fast, paid)",          "anthropic/claude-sonnet-4-6"),
     ("Claude Haiku 4.5 (fastest, paid)",        "anthropic/claude-haiku-4-5-20251001"),
-    # Free models with tool-use support — fast
+    # OpenRouter models (free, rate-limited)
+    ("── OpenRouter (free) ──",                 None),
     ("GPT-OSS 20B (fast, free)",                "openai/gpt-oss-20b:free"),
     ("Nemotron Nano 9B (fastest, free)",        "nvidia/nemotron-nano-9b-v2:free"),
     ("Nemotron Nano 12B (fast, free)",          "nvidia/nemotron-nano-12b-v2-vl:free"),
     ("Nemotron Nano 30B (medium, free)",        "nvidia/nemotron-3-nano-30b-a3b:free"),
-    # Free models with tool-use support — slower
     ("Llama 3.3 70B (slow, free)",              "meta-llama/llama-3.3-70b-instruct:free"),
     ("GPT-OSS 120B (slow, free)",               "openai/gpt-oss-120b:free"),
     ("Nemotron 3 120B (very slow, free)",       "nvidia/nemotron-3-super-120b-a12b:free"),
@@ -322,21 +332,37 @@ with st.sidebar:
 
     # -- Model selector --
     st.markdown('<div class="section-header">LLM Model</div>', unsafe_allow_html=True)
-    model_labels = [label for label, _ in OPENROUTER_MODELS]
+    model_labels = [label for label, _ in AVAILABLE_MODELS]
     current_model_id = st.session_state.selected_model
     current_idx = next(
-        (i for i, (_, mid) in enumerate(OPENROUTER_MODELS) if mid == current_model_id), 0
+        (i for i, (_, mid) in enumerate(AVAILABLE_MODELS) if mid == current_model_id), 0
     )
-    picked_label = st.selectbox("OpenRouter model", model_labels, index=current_idx, key="model_picker")
-    picked_id = dict(OPENROUTER_MODELS)[picked_label]
-    if picked_id == "__custom__":
+    picked_label = st.selectbox("Model", model_labels, index=current_idx, key="model_picker")
+    picked_id = dict(AVAILABLE_MODELS)[picked_label]
+
+    # Handle dividers and custom inputs
+    if picked_id is None:
+        # Divider label selected — reset to default
+        st.session_state.selected_model = ""
+    elif picked_id == "__custom__":
         picked_id = st.text_input(
-            "Custom model ID",
+            "Custom OpenRouter model ID",
             value=current_model_id if current_model_id not in ("", "__custom__") else "",
             placeholder="org/model-name:tag",
             key="custom_model_input",
         )
-    st.session_state.selected_model = picked_id or ""
+        st.session_state.selected_model = picked_id or ""
+    elif picked_id == "__ollama_custom__":
+        picked_id = st.text_input(
+            "Custom Ollama model name",
+            value=current_model_id.removeprefix("ollama:") if current_model_id.startswith("ollama:") else "",
+            placeholder="model-name",
+            key="ollama_custom_input",
+        )
+        st.session_state.selected_model = f"ollama:{picked_id}" if picked_id else ""
+    else:
+        st.session_state.selected_model = picked_id or ""
+
     if st.session_state.selected_model:
         st.caption(f"Active: `{st.session_state.selected_model}`")
     else:

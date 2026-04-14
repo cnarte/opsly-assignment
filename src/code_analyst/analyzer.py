@@ -47,6 +47,7 @@ async def explain_entity(entity_name: str, model: str = "") -> str:
     """Locate a symbol via gitnexus, read source, explain with LLM."""
     from langchain_core.messages import HumanMessage, SystemMessage
     from langchain_openrouter import ChatOpenRouter
+    from langchain_ollama import ChatOllama
     from src.shared.settings import Settings as _Settings
     _settings = _Settings()
 
@@ -68,11 +69,20 @@ async def explain_entity(entity_name: str, model: str = "") -> str:
     if source_context:
         prompt += f"\n\nSource code:\n```python\n{source_context}\n```"
 
-    llm = ChatOpenRouter(
-        model=model or _settings.OPENROUTER_MODEL,
-        openrouter_api_key=_settings.OPENROUTER_API_KEY,
-        temperature=0,
-    )
+    resolved = model or _settings.OPENROUTER_MODEL
+    if resolved.startswith("ollama:"):
+        ollama_model = resolved.removeprefix("ollama:")
+        llm = ChatOllama(
+            model=ollama_model,
+            base_url=_settings.OLLAMA_BASE_URL,
+            temperature=0,
+        )
+    else:
+        llm = ChatOpenRouter(
+            model=resolved,
+            openrouter_api_key=_settings.OPENROUTER_API_KEY,
+            temperature=0,
+        )
 
     response = await llm.ainvoke([
         SystemMessage(content="You are a code analysis expert. Explain clearly and concisely."),
@@ -93,11 +103,21 @@ class CodeAnalyzer:
     def _get_llm(self) -> Any:
         if self._llm is None:
             from langchain_openrouter import ChatOpenRouter
+            from langchain_ollama import ChatOllama
 
-            self._llm = ChatOpenRouter(
-                model=self._settings.OPENROUTER_MODEL,
-                openrouter_api_key=self._settings.OPENROUTER_API_KEY,
-            )
+            model = self._settings.OPENROUTER_MODEL
+            if model.startswith("ollama:"):
+                ollama_model = model.removeprefix("ollama:")
+                self._llm = ChatOllama(
+                    model=ollama_model,
+                    base_url=self._settings.OLLAMA_BASE_URL,
+                    temperature=0,
+                )
+            else:
+                self._llm = ChatOpenRouter(
+                    model=model,
+                    openrouter_api_key=self._settings.OPENROUTER_API_KEY,
+                )
         return self._llm
 
     async def _invoke_llm(self, prompt: str) -> str:
