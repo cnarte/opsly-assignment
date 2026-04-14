@@ -13,4 +13,7 @@ htmlcov/
 *json
 *.md
 video/node_modules/
-.DS_Store
+.DS_Store\
+other-cc-session/
+__MACOSX/
+*.zip
