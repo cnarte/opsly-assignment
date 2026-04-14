@@ -58,6 +58,7 @@ AVAILABLE_MODELS = [
     ("Ollama: llama3.2 (3B, fast)",             "ollama:llama3.2"),
     ("Ollama: llama3.1:8b",                     "ollama:llama3.1:8b"),
     ("Ollama: mistral",                         "ollama:mistral"),
+    ("Ollama: neural-chat",                     "ollama:neural-chat"),
     ("Ollama: deepseek-r1:8b",                  "ollama:deepseek-r1:8b"),
     ("Ollama: custom…",                         "__ollama_custom__"),
     # OpenRouter models (paid, requires credits)
