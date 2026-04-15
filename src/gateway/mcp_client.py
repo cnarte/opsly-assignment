@@ -89,26 +89,29 @@ async def _call_mcp_tool(
 ) -> dict[str, Any]:
     """Low-level helper: connect, call tool, parse result.
 
-    Uses a custom httpx client with a long read timeout so the inline POST
-    response from long-running tools (e.g. route_to_agents, which runs a
-    multi-step LangGraph pipeline) isn't cut short by httpx's default 30-second
-    read timeout.
+    For long-running operations (202 Accepted), we need to keep the streams
+    open long enough for the server to send its response. The key is NOT to
+    exit the context managers until the response is fully available.
 
-    NOTE: asyncio.timeout() is NOT used here because it can cancel the operation
-    mid-stream, leaving the MCP connection in an inconsistent state. Instead,
-    we rely on httpx's timeout which is cleaner for HTTP-level cancellation.
+    We use a longer read timeout on the httpx client to allow both:
+    1. Initial connection and request submission (fast)
+    2. Waiting for response stream to produce data (slow, could take 30+ sec)
     """
     import json
     import httpx
 
     try:
+        # Create httpx client with extended timeouts for long-running operations
+        # Set all timeouts to 'timeout' to handle long-running tool calls
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, read=timeout),
+            timeout=httpx.Timeout(timeout, read=timeout, pool=timeout, write=timeout),
             follow_redirects=True,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         ) as http_client:
             async with streamable_http_client(url, http_client=http_client) as (read, write, _):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
+                    # call_tool awaits the full response before returning
                     result = await session.call_tool(tool_name, arguments)
 
                     # result.content is a list of content blocks
