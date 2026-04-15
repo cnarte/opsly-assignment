@@ -294,7 +294,15 @@ async def react_agent(state: OrchestratorState) -> dict:
     tools = build_tools(repo_id=repo_id, model=model)
     llm = _get_llm(model).bind_tools(tools)
 
-    messages = [SystemMessage(content=REACT_SYSTEM_PROMPT)] + list(state.get("messages", []))
+    # Build system prompt with context-specific info
+    system_prompt = REACT_SYSTEM_PROMPT
+    if repo_id:
+        logger.info("react_agent: Adding repo_id context to prompt: %s", repo_id)
+        system_prompt += f"\n\n**Repository Context**: You are analyzing repository '{repo_id}'. ALWAYS pass repo_id='{repo_id}' to EVERY graph-query tool call like find_entity(name='...', repo_id='{repo_id}')."
+    else:
+        logger.info("react_agent: No repo_id in state")
+
+    messages = [SystemMessage(content=system_prompt)] + list(state.get("messages", []))
 
     # Retry up to 4 times on transient errors from OpenRouter free models:
     #   524/timeout → short backoff (1s, 2s, 4s)
@@ -345,8 +353,26 @@ async def persist_turn(state: OrchestratorState) -> dict:
     for i, m in enumerate(messages):
         msg_type = type(m).__name__
         has_tool_calls = getattr(m, "tool_calls", None) is not None
-        content_preview = str(m.content)[:60] if hasattr(m, "content") else "N/A"
-        logger.info("  [%d] %s (tool_calls=%s): %s", i, msg_type, has_tool_calls, content_preview)
+
+        # Get content preview
+        content = getattr(m, "content", "N/A")
+        content_preview = str(content)[:300]
+
+        # Log tool calls if present
+        if msg_type == "AIMessage" and has_tool_calls:
+            tool_calls = getattr(m, "tool_calls", [])
+            logger.info("  [%d] AIMessage: %d tool_calls, content=%s", i, len(tool_calls), content_preview)
+            for j, tc in enumerate(tool_calls):
+                tool_name = tc.get("name", "?")
+                tool_args = str(tc.get("args", "?"))[:100]
+                logger.info("       tool[%d]: %s(%s)", j, tool_name, tool_args)
+        elif msg_type == "ToolMessage":
+            logger.info("  [%d] ToolMessage: %s", i, content_preview)
+        elif msg_type == "AIMessage":
+            logger.info("  [%d] AIMessage (final): content_len=%d, preview=%s", i, len(str(content)), content_preview)
+            logger.info("       Full content: %s", repr(content)[:500])
+        else:
+            logger.info("  [%d] %s: %s", i, msg_type, content_preview)
 
     if not session_id:
         logger.info("persist_turn: no session_id, returning empty")
