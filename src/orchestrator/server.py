@@ -179,13 +179,16 @@ async def route_to_agents(
 ) -> dict:
     """Run the full ReAct pipeline and return the final response."""
     import uuid
+    logger.info("route_to_agents called: session=%s message=%.50s", session_id, message)
     state = _initial_state(message, session_id, repo_id, model)
     thread_id = session_id or str(uuid.uuid4())
     lf_cb = get_langfuse_callback(session_id=session_id)
     callbacks = [lf_cb] if lf_cb else []
     config = {"recursion_limit": 10, "configurable": {"thread_id": thread_id}, "callbacks": callbacks}
     try:
+        logger.info("Starting graph invocation")
         final_state = await _graph.ainvoke(state, config=config)
+        logger.info("Graph invocation completed")
     except GraphRecursionError:
         logger.warning("Recursion limit reached for query: %s", message[:100])
         checkpoint_tuple = await _graph.aget_state({"configurable": {"thread_id": thread_id}})
@@ -200,22 +203,28 @@ async def route_to_agents(
                 {"session_id": session_id, "query": message, "response": final_response},
                 timeout=10,
             )
-        return {
+        result = {
             "final_response": final_response,
             "session_id": session_id,
             "agent_results": {},
             "tool_plan": [],
         }
+        logger.info("Returning recursion limit result: %s", result)
+        return result
     except Exception as exc:
-        logger.error("Orchestrator pipeline failed: %s", exc)
-        return {"error": str(exc), "final_response": f"Pipeline error: {exc}"}
+        logger.error("Orchestrator pipeline failed: %s", exc, exc_info=True)
+        result = {"error": str(exc), "final_response": f"Pipeline error: {exc}"}
+        logger.info("Returning error result: %s", result)
+        return result
 
-    return {
+    result = {
         "final_response": final_state.get("final_response", ""),
         "session_id": session_id,
-        "agent_results": _safe_serialise({}),
+        "agent_results": {},
         "tool_plan": [],
     }
+    logger.info("Returning success result: final_response=%s", result.get("final_response", "")[:100])
+    return result
 
 
 @mcp.tool()

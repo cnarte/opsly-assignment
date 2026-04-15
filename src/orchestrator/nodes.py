@@ -339,12 +339,23 @@ async def react_agent(state: OrchestratorState) -> dict:
 async def persist_turn(state: OrchestratorState) -> dict:
     """Store this conversation turn in the memory agent."""
     session_id = state.get("session_id", "")
+    messages = state.get("messages", [])
+
+    logger.info("persist_turn: %d messages in state", len(messages))
+    for i, m in enumerate(messages):
+        msg_type = type(m).__name__
+        has_tool_calls = getattr(m, "tool_calls", None) is not None
+        content_preview = str(m.content)[:60] if hasattr(m, "content") else "N/A"
+        logger.info("  [%d] %s (tool_calls=%s): %s", i, msg_type, has_tool_calls, content_preview)
+
     if not session_id:
+        logger.info("persist_turn: no session_id, returning empty")
         return {}
 
-    messages = state.get("messages", [])
     user_msg = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
     ai_msg = next((m.content for m in reversed(messages) if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None)), "")
+
+    logger.info("persist_turn RESULT: user_msg=%.50s ai_msg=%.50s", user_msg, ai_msg)
 
     if user_msg and ai_msg:
         await _call_mcp_agent(
