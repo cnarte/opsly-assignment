@@ -19,6 +19,7 @@ from streamlit_agraph import agraph, Node, Edge, Config
 
 import os
 API_BASE = os.getenv("GATEWAY_URL", "http://localhost:8000")
+LMSTUDIO_BASE_URL = os.getenv("LMSTUDIO_BASE_URL", "http://host.docker.internal:1234")
 REQUEST_TIMEOUT = 300
 
 AGENT_COLORS = {
@@ -49,18 +50,19 @@ LABEL_COLORS = {
     "Docstring": "#EC4899",
 }
 
-AVAILABLE_MODELS = [
-    # Server default
-    ("Server default (env OPENROUTER_MODEL)",   ""),
-    # Ollama models (local, no rate limits)
-    ("── Ollama (local) ──",                    None),
-    ("Ollama: nemotron-cascade-2 (default)",    "ollama:nemotron-cascade-2"),
-    ("Ollama: llama3.2 (3B, fast)",             "ollama:llama3.2"),
-    ("Ollama: llama3.1:8b",                     "ollama:llama3.1:8b"),
-    ("Ollama: mistral",                         "ollama:mistral"),
-    ("Ollama: neural-chat",                     "ollama:neural-chat"),
-    ("Ollama: deepseek-r1:8b",                  "ollama:deepseek-r1:8b"),
-    ("Ollama: custom…",                         "__ollama_custom__"),
+LMSTUDIO_DEFAULT_MODELS = [
+    ("── LM Studio (local) ──",                None),
+    ("LM Studio: gemma-4-e4b (default)",       "lmstudio:google/gemma-4-e4b"),
+    ("LM Studio: nemotron-cascade-2",          "lmstudio:nemotron-cascade-2"),
+    ("LM Studio: devstral (23.6B)",            "lmstudio:devstral"),
+    ("LM Studio: qwen3:14b",                   "lmstudio:qwen3:14b"),
+    ("LM Studio: qwen3:8b",                    "lmstudio:qwen3:8b"),
+    ("LM Studio: deepseek-r1:8b",             "lmstudio:deepseek-r1:8b"),
+    ("LM Studio: llama3.2 (3B, fast)",        "lmstudio:llama3.2"),
+    ("LM Studio: custom…",                    "__lmstudio_custom__"),
+]
+
+OPENROUTER_MODELS = [
     # OpenRouter models (paid, requires credits)
     ("── OpenRouter (paid) ──",                 None),
     ("Claude Sonnet 4.6 (fast, paid)",          "anthropic/claude-sonnet-4-6"),
@@ -76,6 +78,27 @@ AVAILABLE_MODELS = [
     ("Nemotron 3 120B (very slow, free)",       "nvidia/nemotron-3-super-120b-a12b:free"),
     ("Other…",                                  "__custom__"),
 ]
+
+
+def fetch_lmstudio_models() -> list[tuple[str, str | None]]:
+    """Call LM Studio /v1/models and return list of (label, lmstudio:id) tuples."""
+    try:
+        r = httpx.get(f"{LMSTUDIO_BASE_URL}/v1/models", timeout=5)
+        models = r.json().get("data", [])
+        if not models:
+            return []
+        return [("── LM Studio (local) ──", None)] + [
+            (f"LM Studio: {m['id']}", f"lmstudio:{m['id']}")
+            for m in models
+        ] + [("LM Studio: custom…", "__lmstudio_custom__")]
+    except Exception:
+        return []
+
+
+def _build_available_models() -> list[tuple[str, str | None]]:
+    """Combine server-default, LM Studio, and OpenRouter entries."""
+    lms = st.session_state.get("lmstudio_models") or LMSTUDIO_DEFAULT_MODELS
+    return [("Server default (env OPENROUTER_MODEL)", "")] + lms + OPENROUTER_MODELS
 
 
 # ---------------------------------------------------------------------------
@@ -333,17 +356,28 @@ with st.sidebar:
 
     # -- Model selector --
     st.markdown('<div class="section-header">LLM Model</div>', unsafe_allow_html=True)
-    model_labels = [label for label, _ in AVAILABLE_MODELS]
+
+    # Refresh button — fetches live model list from LM Studio
+    if st.button("↻ Refresh LM Studio models", key="refresh_lms"):
+        fetched = fetch_lmstudio_models()
+        if fetched:
+            st.session_state.lmstudio_models = fetched
+            st.success(f"Found {len(fetched) - 2} model(s) from LM Studio")
+        else:
+            st.session_state.lmstudio_models = None
+            st.warning("LM Studio unreachable or no models loaded")
+
+    available = _build_available_models()
+    model_labels = [label for label, _ in available]
     current_model_id = st.session_state.selected_model
     current_idx = next(
-        (i for i, (_, mid) in enumerate(AVAILABLE_MODELS) if mid == current_model_id), 0
+        (i for i, (_, mid) in enumerate(available) if mid == current_model_id), 0
     )
     picked_label = st.selectbox("Model", model_labels, index=current_idx, key="model_picker")
-    picked_id = dict(AVAILABLE_MODELS)[picked_label]
+    picked_id = dict(available)[picked_label]
 
     # Handle dividers and custom inputs
     if picked_id is None:
-        # Divider label selected — reset to default
         st.session_state.selected_model = ""
     elif picked_id == "__custom__":
         picked_id = st.text_input(
@@ -353,14 +387,14 @@ with st.sidebar:
             key="custom_model_input",
         )
         st.session_state.selected_model = picked_id or ""
-    elif picked_id == "__ollama_custom__":
+    elif picked_id == "__lmstudio_custom__":
         picked_id = st.text_input(
-            "Custom Ollama model name",
-            value=current_model_id.removeprefix("ollama:") if current_model_id.startswith("ollama:") else "",
-            placeholder="model-name",
-            key="ollama_custom_input",
+            "Custom LM Studio model ID",
+            value=current_model_id.removeprefix("lmstudio:") if current_model_id.startswith("lmstudio:") else "",
+            placeholder="model-id (as shown in LM Studio)",
+            key="lmstudio_custom_input",
         )
-        st.session_state.selected_model = f"ollama:{picked_id}" if picked_id else ""
+        st.session_state.selected_model = f"lmstudio:{picked_id}" if picked_id else ""
     else:
         st.session_state.selected_model = picked_id or ""
 

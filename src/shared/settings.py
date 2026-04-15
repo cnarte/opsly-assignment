@@ -20,8 +20,8 @@ class Settings(BaseSettings):
     # (3-8s vs 60-90s per call). Override via OPENROUTER_MODEL env var or UI dropdown.
     OPENROUTER_MODEL: str = "meta-llama/llama-3.1-8b-instruct:free"
 
-    # LLM / Ollama (local models, no rate limiting)
-    OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
+    # LLM / LM Studio (local models via OpenAI-compatible API, no rate limiting)
+    LMSTUDIO_BASE_URL: str = "http://host.docker.internal:1234/v1"
 
     # OpenAI Embeddings
     OPENAI_API_KEY: str = ""

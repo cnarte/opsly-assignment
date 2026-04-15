@@ -47,7 +47,7 @@ async def explain_entity(entity_name: str, model: str = "") -> str:
     """Locate a symbol via gitnexus, read source, explain with LLM."""
     from langchain_core.messages import HumanMessage, SystemMessage
     from langchain_openrouter import ChatOpenRouter
-    from langchain_ollama import ChatOllama
+    from langchain_openai import ChatOpenAI
     from src.shared.settings import Settings as _Settings
     _settings = _Settings()
 
@@ -70,11 +70,12 @@ async def explain_entity(entity_name: str, model: str = "") -> str:
         prompt += f"\n\nSource code:\n```python\n{source_context}\n```"
 
     resolved = model or _settings.OPENROUTER_MODEL
-    if resolved.startswith("ollama:"):
-        ollama_model = resolved.removeprefix("ollama:")
-        llm = ChatOllama(
-            model=ollama_model,
-            base_url=_settings.OLLAMA_BASE_URL,
+    if resolved.startswith("lmstudio:"):
+        lms_model = resolved.removeprefix("lmstudio:")
+        llm = ChatOpenAI(
+            model=lms_model,
+            base_url=_settings.LMSTUDIO_BASE_URL,
+            api_key="lm-studio",
             temperature=0,
         )
     else:
@@ -103,14 +104,15 @@ class CodeAnalyzer:
     def _get_llm(self) -> Any:
         if self._llm is None:
             from langchain_openrouter import ChatOpenRouter
-            from langchain_ollama import ChatOllama
+            from langchain_openai import ChatOpenAI
 
             model = self._settings.OPENROUTER_MODEL
-            if model.startswith("ollama:"):
-                ollama_model = model.removeprefix("ollama:")
-                self._llm = ChatOllama(
-                    model=ollama_model,
-                    base_url=self._settings.OLLAMA_BASE_URL,
+            if model.startswith("lmstudio:"):
+                lms_model = model.removeprefix("lmstudio:")
+                self._llm = ChatOpenAI(
+                    model=lms_model,
+                    base_url=self._settings.LMSTUDIO_BASE_URL,
+                    api_key="lm-studio",
                     temperature=0,
                 )
             else:
