@@ -103,6 +103,8 @@ services:
       gitnexus-agent:
         condition: service_healthy
     env_file: .env
+    volumes:
+      - gitnexus_workspace:/workspace/repos
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8012),2); s.close()"]
       interval: 10s

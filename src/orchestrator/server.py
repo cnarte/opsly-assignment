@@ -42,7 +42,7 @@ async def stream_chat(body: dict):
     state = _initial_state(message, session_id, repo_id, model)
     lf_cb = get_langfuse_callback(session_id=session_id)
     callbacks = [lf_cb] if lf_cb else []
-    config = {"recursion_limit": 10, "configurable": {"thread_id": thread_id}, "callbacks": callbacks}
+    config = {"recursion_limit": 50, "configurable": {"thread_id": thread_id}, "callbacks": callbacks}
 
     async def _event_generator():
         logger.info("stream_chat starting: session=%s msg=%.60s", session_id, message)

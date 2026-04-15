@@ -320,6 +320,64 @@ async def list_entities_tree(entity_type: str, repo_id: str = "") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# File-level analysis tool (bypasses symbol search limitations)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def analyze_file(file_path: str, focus: str = "") -> dict:
+    """Analyze a file directly for decorators, imports, classes, functions.
+
+    Bypasses symbol-search limitations by reading raw file content.
+    Args:
+        file_path: e.g., "fastapi/routing.py"
+        focus: What to analyze (e.g., "decorators", "imports", "classes")
+
+    Returns: Analysis with file content, extracted entities, and patterns
+    """
+    import os
+
+    workspace = os.getenv("WORKSPACE_PATH", "/workspace/repos")
+    analysis = {
+        "file_path": file_path,
+        "focus": focus,
+        "found": False,
+        "content": "",
+        "decorators": [],
+        "classes": [],
+        "functions": [],
+        "imports": [],
+    }
+
+    # Try to find the file in indexed repos
+    if os.path.exists(workspace):
+        for repo_dir in os.listdir(workspace):
+            candidate = os.path.join(workspace, repo_dir, file_path)
+            if os.path.exists(candidate):
+                try:
+                    with open(candidate, "r") as f:
+                        content = f.read()
+                    analysis["found"] = True
+                    analysis["content"] = content
+                    analysis["repo"] = repo_dir
+
+                    # Basic pattern extraction
+                    import re
+                    analysis["decorators"] = re.findall(r"@\w+[\w\.\(]*", content)
+                    analysis["classes"] = re.findall(r"^class\s+(\w+)", content, re.MULTILINE)
+                    analysis["functions"] = re.findall(r"^(?:async\s+)?def\s+(\w+)", content, re.MULTILINE)
+                    analysis["imports"] = re.findall(r"^(?:from|import)\s+(.+)$", content, re.MULTILINE)
+
+                    return analysis
+                except Exception as e:
+                    analysis["error"] = str(e)
+                    return analysis
+
+    analysis["error"] = f"File not found in {workspace}"
+    return analysis
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

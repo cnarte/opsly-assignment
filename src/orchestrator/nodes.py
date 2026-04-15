@@ -225,6 +225,10 @@ def build_tools(repo_id: str = "", model: str = "") -> list:
          "Use this instead of list_entities for 'get all X' queries — returns a compact summary safe for large repos.",
          {"entity_type": {"type": "string", "description": "Function, Class, File, Folder"},
           "repo_id": {"type": "string"}}),
+        ("analyze_file", "Read and analyze a file directly for decorators, imports, classes, functions. "
+         "Bypasses symbol-search limitations by reading raw file content.",
+         {"file_path": {"type": "string", "description": "e.g., fastapi/routing.py"},
+          "focus": {"type": "string", "description": "What to analyze: decorators, imports, classes, functions"}}),
     ]:
         tools.append(_make_mcp_tool("graph_query", gq_port, name, desc, schema))
 
