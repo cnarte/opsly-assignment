@@ -304,6 +304,23 @@ async def react_agent(state: OrchestratorState) -> dict:
 
     messages = [SystemMessage(content=system_prompt)] + list(state.get("messages", []))
 
+    logger.info("react_agent: %d messages to LLM", len(messages))
+    for i, m in enumerate(messages):
+        m_type = type(m).__name__
+        content_len = len(str(getattr(m, 'content', '')))
+        if i == 0:  # System prompt
+            logger.info("  [sys] SystemMessage: %d chars", content_len)
+        elif m_type == "HumanMessage":
+            logger.info("  [%d] %s: %s...", i, m_type, str(m.content)[:100])
+        elif m_type == "AIMessage":
+            tool_calls = len(getattr(m, 'tool_calls', []))
+            logger.info("  [%d] %s: %d tool_calls, content=%d chars", i, m_type, tool_calls, content_len)
+        elif m_type == "ToolMessage":
+            tool_name = getattr(m, 'name', '?')
+            logger.info("  [%d] ToolMessage (%s): %d chars, preview: %s", i, tool_name, content_len, str(m.content)[:300])
+        else:
+            logger.info("  [%d] %s: %d chars", i, m_type, content_len)
+
     # Retry up to 4 times on transient errors from OpenRouter free models:
     #   524/timeout → short backoff (1s, 2s, 4s)
     #   429 rate-limit → longer backoff (10s, 20s, 40s)
@@ -311,6 +328,11 @@ async def react_agent(state: OrchestratorState) -> dict:
     for attempt in range(4):
         try:
             response = await llm.ainvoke(messages)
+            logger.info("react_agent LLM response: type=%s, content_len=%d, tool_calls=%s",
+                       type(response).__name__,
+                       len(str(getattr(response, 'content', ''))),
+                       len(getattr(response, 'tool_calls', [])) if hasattr(response, 'tool_calls') else 'N/A')
+            logger.info("  content preview: %s", str(getattr(response, 'content', ''))[:200])
             break
         except Exception as exc:
             err = str(exc)
