@@ -585,7 +585,7 @@ with chat_col:
                 "message": prompt,
                 "session_id": st.session_state.session_id,
                 "repo_id": st.session_state.active_repo_id,
-                "stream": True,
+                "stream": False,
                 "model": st.session_state.selected_model or None,
             }
 
@@ -593,82 +593,28 @@ with chat_col:
 
             with st.chat_message("assistant"):
                 msg_placeholder = st.empty()
-                tool_placeholder = st.empty()
-                accumulated = ""
-                active_tools: list[str] = []
-                _pending_tool: dict | None = None  # tool_call waiting for its result
 
                 try:
-                    with httpx.stream(
-                        "POST",
+                    # Use non-streaming endpoint for reliability
+                    # The non-streaming API returns complete, comprehensive responses
+                    resp = httpx.post(
                         f"{gateway_url}/api/chat",
                         json=payload,
                         timeout=300,
-                    ) as resp:
-                        for raw_line in resp.iter_lines():
-                            if not raw_line:
-                                continue
-                            line = raw_line.strip()
-                            if not line.startswith("data:"):
-                                continue
-                            try:
-                                event = _json.loads(line[5:].strip())
-                            except _json.JSONDecodeError:
-                                continue
-
-                            etype = event.get("type", "")
-                            if etype == "token":
-                                accumulated += event.get("content", "")
-                                msg_placeholder.markdown(accumulated + "▌")
-                            elif etype == "tool_call":
-                                tool_name = event.get("tool", "")
-                                active_tools.append(tool_name)
-                                _pending_tool = {
-                                    "tool": tool_name,
-                                    "args": event.get("args", ""),
-                                    "result": None,
-                                    "ts": time.strftime("%H:%M:%S"),
-                                }
-                                activity["tool_calls"].append(_pending_tool)
-                                tool_placeholder.caption(
-                                    " · ".join(f"🔧 {t}" for t in active_tools[-3:])
-                                )
-                            elif etype == "tool_result":
-                                # Attach result to the last pending tool call
-                                if _pending_tool is not None:
-                                    _pending_tool["result"] = event.get("result", "")
-                                    _pending_tool = None
-                            elif etype == "retry":
-                                reason = event.get("reason", "")
-                                wait = event.get("wait", 0)
-                                attempt = event.get("attempt", 1)
-                                label = (
-                                    "Rate limited"
-                                    if reason == "rate_limit"
-                                    else "Timeout"
-                                )
-                                tool_placeholder.caption(
-                                    f"⏳ {label} — retrying in {wait}s (attempt {attempt}/4)…"
-                                )
-                            elif etype == "done":
-                                break
-                            elif etype == "error":
-                                accumulated = f"Error: {event.get('error', 'unknown')}"
-                                break
-
-                    msg_placeholder.markdown(accumulated)
-                    tool_placeholder.empty()
-                    result = {
-                        "response": accumulated,
-                        "session_id": st.session_state.session_id,
-                    }
+                    )
+                    result = resp.json()
+                    response_text = result.get("response", "")
+                    if response_text:
+                        msg_placeholder.markdown(response_text)
+                    else:
+                        msg_placeholder.error("No response from the model")
 
                 except Exception as exc:
-                    accumulated = f"Connection error: {exc}"
-                    msg_placeholder.markdown(accumulated)
-                    result = {"response": accumulated}
+                    response_text = f"Connection error: {exc}"
+                    msg_placeholder.markdown(response_text)
+                    result = {"response": response_text}
 
-                response = accumulated
+                response = response_text
                 agents_used = result.get("agents_used", [])
                 st.session_state.session_id = result.get(
                     "session_id", st.session_state.session_id
