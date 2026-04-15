@@ -18,6 +18,7 @@ from streamlit_agraph import agraph, Node, Edge, Config
 # ---------------------------------------------------------------------------
 
 import os
+
 API_BASE = os.getenv("GATEWAY_URL", "http://localhost:8000")
 LMSTUDIO_BASE_URL = os.getenv("LMSTUDIO_BASE_URL", "http://host.docker.internal:1234")
 REQUEST_TIMEOUT = 300
@@ -51,32 +52,31 @@ LABEL_COLORS = {
 }
 
 LMSTUDIO_DEFAULT_MODELS = [
-    ("── LM Studio (local) ──",                None),
-    ("LM Studio: gemma-4-e4b (default)",       "lmstudio:google/gemma-4-e4b"),
-    ("LM Studio: nemotron-cascade-2",          "lmstudio:nemotron-cascade-2"),
-    ("LM Studio: devstral (23.6B)",            "lmstudio:devstral"),
-    ("LM Studio: qwen3:14b",                   "lmstudio:qwen3:14b"),
-    ("LM Studio: qwen3:8b",                    "lmstudio:qwen3:8b"),
-    ("LM Studio: deepseek-r1:8b",             "lmstudio:deepseek-r1:8b"),
-    ("LM Studio: llama3.2 (3B, fast)",        "lmstudio:llama3.2"),
-    ("LM Studio: custom…",                    "__lmstudio_custom__"),
+    ("── LM Studio (local) ──", None),
+    ("LM Studio: Qwen 3.5 35B (recommended)", "lmstudio:qwen/qwen3.5-35b-a3b"),
+    ("LM Studio: Qwen 3.5 9B", "lmstudio:qwen/qwen3.5-9b"),
+    ("LM Studio: gemma-4-31b", "lmstudio:google/gemma-4-31b"),
+    ("LM Studio: gemma-4-26b", "lmstudio:google/gemma-4-26b-a4b"),
+    ("LM Studio: gemma-4-e4b", "lmstudio:google/gemma-4-e4b"),
+    ("LM Studio: nemotron-nano-4b", "lmstudio:nvidia/nemotron-3-nano-4b"),
+    ("LM Studio: custom…", "__lmstudio_custom__"),
 ]
 
 OPENROUTER_MODELS = [
     # OpenRouter models (paid, requires credits)
-    ("── OpenRouter (paid) ──",                 None),
-    ("Claude Sonnet 4.6 (fast, paid)",          "anthropic/claude-sonnet-4-6"),
-    ("Claude Haiku 4.5 (fastest, paid)",        "anthropic/claude-haiku-4-5-20251001"),
+    ("── OpenRouter (paid) ──", None),
+    ("Claude Sonnet 4.6 (fast, paid)", "anthropic/claude-sonnet-4-6"),
+    ("Claude Haiku 4.5 (fastest, paid)", "anthropic/claude-haiku-4-5-20251001"),
     # OpenRouter models (free, rate-limited)
-    ("── OpenRouter (free) ──",                 None),
-    ("GPT-OSS 20B (fast, free)",                "openai/gpt-oss-20b:free"),
-    ("Nemotron Nano 9B (fastest, free)",        "nvidia/nemotron-nano-9b-v2:free"),
-    ("Nemotron Nano 12B (fast, free)",          "nvidia/nemotron-nano-12b-v2-vl:free"),
-    ("Nemotron Nano 30B (medium, free)",        "nvidia/nemotron-3-nano-30b-a3b:free"),
-    ("Llama 3.3 70B (slow, free)",              "meta-llama/llama-3.3-70b-instruct:free"),
-    ("GPT-OSS 120B (slow, free)",               "openai/gpt-oss-120b:free"),
-    ("Nemotron 3 120B (very slow, free)",       "nvidia/nemotron-3-super-120b-a12b:free"),
-    ("Other…",                                  "__custom__"),
+    ("── OpenRouter (free) ──", None),
+    ("GPT-OSS 20B (fast, free)", "openai/gpt-oss-20b:free"),
+    ("Nemotron Nano 9B (fastest, free)", "nvidia/nemotron-nano-9b-v2:free"),
+    ("Nemotron Nano 12B (fast, free)", "nvidia/nemotron-nano-12b-v2-vl:free"),
+    ("Nemotron Nano 30B (medium, free)", "nvidia/nemotron-3-nano-30b-a3b:free"),
+    ("Llama 3.3 70B (slow, free)", "meta-llama/llama-3.3-70b-instruct:free"),
+    ("GPT-OSS 120B (slow, free)", "openai/gpt-oss-120b:free"),
+    ("Nemotron 3 120B (very slow, free)", "nvidia/nemotron-3-super-120b-a12b:free"),
+    ("Other…", "__custom__"),
 ]
 
 
@@ -87,10 +87,11 @@ def fetch_lmstudio_models() -> list[tuple[str, str | None]]:
         models = r.json().get("data", [])
         if not models:
             return []
-        return [("── LM Studio (local) ──", None)] + [
-            (f"LM Studio: {m['id']}", f"lmstudio:{m['id']}")
-            for m in models
-        ] + [("LM Studio: custom…", "__lmstudio_custom__")]
+        return (
+            [("── LM Studio (local) ──", None)]
+            + [(f"LM Studio: {m['id']}", f"lmstudio:{m['id']}") for m in models]
+            + [("LM Studio: custom…", "__lmstudio_custom__")]
+        )
     except Exception:
         return []
 
@@ -134,7 +135,11 @@ def api_get_repos() -> list[str]:
 def _repo_id_from_url(url: str) -> str:
     """Derive a short repo identifier from a git URL, e.g. 'fastapi/fastapi'."""
     parts = url.rstrip("/").removesuffix(".git").split("/")
-    return f"{parts[-2]}/{parts[-1]}" if len(parts) >= 2 else (parts[-1] if parts else "local")
+    return (
+        f"{parts[-2]}/{parts[-1]}"
+        if len(parts) >= 2
+        else (parts[-1] if parts else "local")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +153,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.markdown("""
+st.markdown(
+    """
 <style>
     /* Light theme */
     .stApp {
@@ -254,7 +260,9 @@ st.markdown("""
     footer {visibility: hidden;}
     header {visibility: hidden;}
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +304,9 @@ with st.sidebar:
     st.divider()
 
     # -- Health dashboard --
-    st.markdown('<div class="section-header">System Health</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-header">System Health</div>', unsafe_allow_html=True
+    )
 
     health = api_get("/api/agents/health")
     if "error" not in health:
@@ -304,7 +314,7 @@ with st.sidebar:
         status_color = "#10B981" if status == "ok" else "#F59E0B"
         st.markdown(
             f'<span style="color:{status_color};font-weight:600;">'
-            f'{"🟢" if status == "ok" else "🟡"} System: {status.upper()}</span>',
+            f"{'🟢' if status == 'ok' else '🟡'} System: {status.upper()}</span>",
             unsafe_allow_html=True,
         )
 
@@ -317,7 +327,7 @@ with st.sidebar:
                 f'<span class="status-dot {dot_class}"></span>'
                 f'<span style="color:{color};font-weight:500;">{icon} {name}</span>'
                 f'<span style="color:#64748B;font-size:0.8rem;margin-left:auto;">{state}</span>'
-                f'</div>',
+                f"</div>",
                 unsafe_allow_html=True,
             )
     else:
@@ -326,7 +336,9 @@ with st.sidebar:
     st.divider()
 
     # -- Graph stats --
-    st.markdown('<div class="section-header">Knowledge Graph</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-header">Knowledge Graph</div>', unsafe_allow_html=True
+    )
 
     stats = api_get("/api/graph/statistics")
     if "error" not in stats:
@@ -346,7 +358,7 @@ with st.sidebar:
                         f'background:{color};display:inline-block;"></span>'
                         f'<span style="color:#CBD5E1;font-size:0.85rem;flex:1;">{label}</span>'
                         f'<span style="color:#94A3B8;font-size:0.8rem;">{count:,}</span>'
-                        f'</div>',
+                        f"</div>",
                         unsafe_allow_html=True,
                     )
         else:
@@ -373,7 +385,9 @@ with st.sidebar:
     current_idx = next(
         (i for i, (_, mid) in enumerate(available) if mid == current_model_id), 0
     )
-    picked_label = st.selectbox("Model", model_labels, index=current_idx, key="model_picker")
+    picked_label = st.selectbox(
+        "Model", model_labels, index=current_idx, key="model_picker"
+    )
     picked_id = dict(available)[picked_label]
 
     # Handle dividers and custom inputs
@@ -382,7 +396,9 @@ with st.sidebar:
     elif picked_id == "__custom__":
         picked_id = st.text_input(
             "Custom OpenRouter model ID",
-            value=current_model_id if current_model_id not in ("", "__custom__") else "",
+            value=current_model_id
+            if current_model_id not in ("", "__custom__")
+            else "",
             placeholder="org/model-name:tag",
             key="custom_model_input",
         )
@@ -390,7 +406,9 @@ with st.sidebar:
     elif picked_id == "__lmstudio_custom__":
         picked_id = st.text_input(
             "Custom LM Studio model ID",
-            value=current_model_id.removeprefix("lmstudio:") if current_model_id.startswith("lmstudio:") else "",
+            value=current_model_id.removeprefix("lmstudio:")
+            if current_model_id.startswith("lmstudio:")
+            else "",
             placeholder="model-id (as shown in LM Studio)",
             key="lmstudio_custom_input",
         )
@@ -405,7 +423,9 @@ with st.sidebar:
     st.divider()
 
     # -- Indexing controls --
-    st.markdown('<div class="section-header">Repository Indexing</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-header">Repository Indexing</div>', unsafe_allow_html=True
+    )
 
     with st.form("index_form", clear_on_submit=False):
         repo_url = st.text_input(
@@ -425,7 +445,9 @@ with st.sidebar:
                     if rid not in st.session_state.indexed_repos:
                         st.session_state.indexed_repos.append(rid)
                     st.session_state.active_repo_id = rid
-                    st.success(f"Job started: `{result.get('job_id', 'unknown')[:8]}...`")
+                    st.success(
+                        f"Job started: `{result.get('job_id', 'unknown')[:8]}...`"
+                    )
                 else:
                     st.error(result["error"])
 
@@ -436,7 +458,9 @@ with st.sidebar:
             options=[""] + st.session_state.indexed_repos,
             index=([""] + st.session_state.indexed_repos).index(
                 st.session_state.active_repo_id
-            ) if st.session_state.active_repo_id in st.session_state.indexed_repos else 0,
+            )
+            if st.session_state.active_repo_id in st.session_state.indexed_repos
+            else 0,
             format_func=lambda x: "All repos" if x == "" else x,
         )
 
@@ -450,12 +474,15 @@ with st.sidebar:
         job_status = status_data.get("status", "unknown")
 
         status_colors = {
-            "started": "🔵", "cloning": "🔵", "indexing": "🟡",
-            "completed": "🟢", "failed": "🔴",
+            "started": "🔵",
+            "cloning": "🔵",
+            "indexing": "🟡",
+            "completed": "🟢",
+            "failed": "🔴",
         }
         st.markdown(
-            f'{status_colors.get(job_status, "⚪")} '
-            f'**Job:** `{job_id[:8]}...` — **{job_status}**'
+            f"{status_colors.get(job_status, '⚪')} "
+            f"**Job:** `{job_id[:8]}...` — **{job_status}**"
         )
         if job_status in ("started", "cloning", "indexing"):
             st.button("🔄 Refresh Status", key="refresh_idx")
@@ -465,7 +492,11 @@ with st.sidebar:
     # -- Session controls --
     st.markdown('<div class="section-header">Session</div>', unsafe_allow_html=True)
     st.caption(f"ID: `{st.session_state.session_id}`")
-    load_id = st.text_input("Load session ID", placeholder="paste a session ID…", label_visibility="collapsed")
+    load_id = st.text_input(
+        "Load session ID",
+        placeholder="paste a session ID…",
+        label_visibility="collapsed",
+    )
     if st.button("Load", use_container_width=True, disabled=not load_id.strip()):
         sid = load_id.strip()
         history = api_get(f"/api/history/{sid}")
@@ -522,7 +553,7 @@ with chat_col:
                         badges_html += (
                             f'<span class="agent-badge" '
                             f'style="background:{color};">'
-                            f'{icon} {agent}</span>'
+                            f"{icon} {agent}</span>"
                         )
                     st.markdown(badges_html, unsafe_allow_html=True)
 
@@ -542,7 +573,7 @@ with chat_col:
             "timestamp": time.strftime("%H:%M:%S"),
             "status": "running",
             "agents": [],
-            "tool_calls": [],   # list of {tool, args, result, duration_ms}
+            "tool_calls": [],  # list of {tool, args, result, duration_ms}
         }
         st.session_state.agent_activities.insert(0, activity)
 
@@ -565,7 +596,7 @@ with chat_col:
                 tool_placeholder = st.empty()
                 accumulated = ""
                 active_tools: list[str] = []
-                _pending_tool: dict | None = None   # tool_call waiting for its result
+                _pending_tool: dict | None = None  # tool_call waiting for its result
 
                 try:
                     with httpx.stream(
@@ -611,7 +642,11 @@ with chat_col:
                                 reason = event.get("reason", "")
                                 wait = event.get("wait", 0)
                                 attempt = event.get("attempt", 1)
-                                label = "Rate limited" if reason == "rate_limit" else "Timeout"
+                                label = (
+                                    "Rate limited"
+                                    if reason == "rate_limit"
+                                    else "Timeout"
+                                )
                                 tool_placeholder.caption(
                                     f"⏳ {label} — retrying in {wait}s (attempt {attempt}/4)…"
                                 )
@@ -623,7 +658,10 @@ with chat_col:
 
                     msg_placeholder.markdown(accumulated)
                     tool_placeholder.empty()
-                    result = {"response": accumulated, "session_id": st.session_state.session_id}
+                    result = {
+                        "response": accumulated,
+                        "session_id": st.session_state.session_id,
+                    }
 
                 except Exception as exc:
                     accumulated = f"Connection error: {exc}"
@@ -644,7 +682,7 @@ with chat_col:
                         badges_html += (
                             f'<span class="agent-badge" '
                             f'style="background:{color};">'
-                            f'{icon} {agent}</span>'
+                            f"{icon} {agent}</span>"
                         )
                     st.markdown(badges_html, unsafe_allow_html=True)
 
@@ -653,12 +691,14 @@ with chat_col:
         activity["agents"] = agents_used
         activity["classification"] = result.get("query_classification", {})
 
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": response,
-            "agents_used": agents_used,
-            "raw_result": result,
-        })
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": response,
+                "agents_used": agents_used,
+                "raw_result": result,
+            }
+        )
 
         # Check if graph data is present and track freshness
         agent_results = result.get("agent_results", {})
@@ -683,18 +723,20 @@ with panel_col:
             st.markdown(
                 '<div style="text-align:center;padding:40px;color:#64748B;">'
                 '<div style="font-size:2rem;margin-bottom:8px;">🎯</div>'
-                'Agent activity will appear here<br>when you start chatting.'
-                '</div>',
+                "Agent activity will appear here<br>when you start chatting."
+                "</div>",
                 unsafe_allow_html=True,
             )
         else:
             for i, act in enumerate(st.session_state.agent_activities[:10]):
                 status_icon = "🟢" if act["status"] == "done" else "🔄"
-                query_preview = act["query"][:40] + ("…" if len(act["query"]) > 40 else "")
+                query_preview = act["query"][:40] + (
+                    "…" if len(act["query"]) > 40 else ""
+                )
                 tool_count = len(act.get("tool_calls", []))
-                label = f'{status_icon} {act["timestamp"]} — {query_preview}'
+                label = f"{status_icon} {act['timestamp']} — {query_preview}"
                 if tool_count:
-                    label += f'  `{tool_count} tools`'
+                    label += f"  `{tool_count} tools`"
                 with st.expander(label, expanded=(i == 0)):
                     # Agent badges
                     if act.get("agents"):
@@ -705,7 +747,7 @@ with panel_col:
                             st.markdown(
                                 f'<span class="agent-badge" '
                                 f'style="background:{color};">'
-                                f'{icon} {agent}</span>',
+                                f"{icon} {agent}</span>",
                                 unsafe_allow_html=True,
                             )
 
@@ -714,7 +756,9 @@ with panel_col:
                     if cls:
                         col_a, col_b = st.columns(2)
                         col_a.markdown(f"**Intent:** `{cls.get('intent', '—')}`")
-                        col_b.markdown(f"**Complexity:** `{cls.get('complexity', '—')}`")
+                        col_b.markdown(
+                            f"**Complexity:** `{cls.get('complexity', '—')}`"
+                        )
                         entities = cls.get("entities", [])
                         if entities:
                             st.markdown(
@@ -737,7 +781,12 @@ with panel_col:
                                     st.markdown("**Input:**")
                                     try:
                                         import json as _j
-                                        args_parsed = _j.loads(tc["args"]) if isinstance(tc["args"], str) else tc["args"]
+
+                                        args_parsed = (
+                                            _j.loads(tc["args"])
+                                            if isinstance(tc["args"], str)
+                                            else tc["args"]
+                                        )
                                         st.json(args_parsed)
                                     except Exception:
                                         st.code(str(tc["args"])[:400], language=None)
@@ -746,7 +795,12 @@ with panel_col:
                                     result_str = str(tc["result"])
                                     try:
                                         import json as _j
-                                        result_parsed = _j.loads(result_str) if result_str.startswith(("{", "[")) else None
+
+                                        result_parsed = (
+                                            _j.loads(result_str)
+                                            if result_str.startswith(("{", "["))
+                                            else None
+                                        )
                                         if result_parsed:
                                             st.json(result_parsed)
                                         else:
@@ -761,7 +815,7 @@ with panel_col:
         if graph_data and not st.session_state.graph_is_current:
             query_text = st.session_state.graph_query_text
             truncated = query_text[:50] + "..." if len(query_text) > 50 else query_text
-            st.info(f"📌 From previous query: *\"{truncated}\"*")
+            st.info(f'📌 From previous query: *"{truncated}"*')
 
         def _build_graph(gd: dict) -> tuple[list, list]:
             """Convert graph_query agent results into agraph Node/Edge lists."""
@@ -774,13 +828,24 @@ with panel_col:
                     seen.add(name)
                     kind = (labels or [""])[0]
                     color = LABEL_COLORS.get(kind, "#64748B")
-                    g_nodes.append(Node(id=name, label=name, size=size, color=color,
-                                        font={"color": "#E2E8F0"}))
+                    g_nodes.append(
+                        Node(
+                            id=name,
+                            label=name,
+                            size=size,
+                            color=color,
+                            font={"color": "#E2E8F0"},
+                        )
+                    )
                 return name
 
-            def _edge(src: str, tgt: str, label: str = "", color: str = "#475569") -> None:
+            def _edge(
+                src: str, tgt: str, label: str = "", color: str = "#475569"
+            ) -> None:
                 if src and tgt:
-                    g_edges.append(Edge(source=src, target=tgt, label=label, color=color))
+                    g_edges.append(
+                        Edge(source=src, target=tgt, label=label, color=color)
+                    )
 
             for tool_result in gd.values():
                 if not isinstance(tool_result, dict):
@@ -829,11 +894,21 @@ with panel_col:
                     for r in tool_result.get("outgoing", []):
                         related = r.get("related_name", "")
                         _node(related, r.get("related_labels", []), 18)
-                        _edge(symbol, related, r.get("relationship") or r.get("rel", ""), "#3B82F6")
+                        _edge(
+                            symbol,
+                            related,
+                            r.get("relationship") or r.get("rel", ""),
+                            "#3B82F6",
+                        )
                     for r in tool_result.get("incoming", []):
                         related = r.get("related_name", "")
                         _node(related, r.get("related_labels", []), 18)
-                        _edge(related, symbol, r.get("relationship") or r.get("rel", ""), "#10B981")
+                        _edge(
+                            related,
+                            symbol,
+                            r.get("relationship") or r.get("rel", ""),
+                            "#10B981",
+                        )
 
                 # analyze_impact → {"symbol": "...", "levels": {"1": [...], "2": [...]}}
                 symbol = tool_result.get("symbol", "")
@@ -860,13 +935,19 @@ with panel_col:
                 if isinstance(tree, dict) and tree:
                     root_id = f"[{entity_type_label}s]"
                     _node(root_id, [entity_type_label], 32)
-                    for folder, folder_data in sorted(tree.items(), key=lambda x: -x[1]["count"]):
-                        display_folder = "(root files)" if folder == "_root" else f"{folder}/"
+                    for folder, folder_data in sorted(
+                        tree.items(), key=lambda x: -x[1]["count"]
+                    ):
+                        display_folder = (
+                            "(root files)" if folder == "_root" else f"{folder}/"
+                        )
                         folder_label = "Root" if folder == "_root" else "Folder"
                         folder_id = display_folder
                         _node(folder_id, [folder_label], 24)
                         _edge(root_id, folder_id, str(folder_data["count"]), "#F59E0B")
-                        for filename, count in sorted(folder_data["files"].items(), key=lambda x: -x[1])[:10]:
+                        for filename, count in sorted(
+                            folder_data["files"].items(), key=lambda x: -x[1]
+                        )[:10]:
                             file_id = f"{folder}/{filename}"
                             _node(file_id, ["File"], 18)
                             _edge(folder_id, file_id, str(count), "#64748B")
@@ -877,9 +958,9 @@ with panel_col:
             st.markdown(
                 '<div style="text-align:center;padding:40px;color:#64748B;">'
                 '<div style="font-size:2rem;margin-bottom:8px;">🕸️</div>'
-                'Graph visualizations appear here when<br>'
-                'the graph_query agent finds relationships.'
-                '</div>',
+                "Graph visualizations appear here when<br>"
+                "the graph_query agent finds relationships."
+                "</div>",
                 unsafe_allow_html=True,
             )
         else:
@@ -901,7 +982,9 @@ with panel_col:
                 )
                 agraph(nodes=nodes, edges=edges, config=config)
             else:
-                st.info("Graph query returned results but no relationships to visualize yet.")
+                st.info(
+                    "Graph query returned results but no relationships to visualize yet."
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -914,12 +997,22 @@ if "error" not in stats_data:
     labels = stats_data.get("labels", {})
     # Icon map for known label types; unlisted types get a generic icon
     _LABEL_ICONS = {
-        "Function": "⚡", "Method": "🔧", "Class": "🏗️",
-        "File": "📄", "Folder": "📁", "Process": "🔄", "Cluster": "🔗",
-        "Import": "📥", "Decorator": "🎨",
+        "Function": "⚡",
+        "Method": "🔧",
+        "Class": "🏗️",
+        "File": "📄",
+        "Folder": "📁",
+        "Process": "🔄",
+        "Cluster": "🔗",
+        "Import": "📥",
+        "Decorator": "🎨",
     }
     # Only show labels that exist in the index (count > 0)
-    active = [(label, cnt) for label, cnt in sorted(labels.items(), key=lambda x: -x[1]) if cnt > 0]
+    active = [
+        (label, cnt)
+        for label, cnt in sorted(labels.items(), key=lambda x: -x[1])
+        if cnt > 0
+    ]
     foot_cols = st.columns(max(len(active), 1))
     for col, (label, cnt) in zip(foot_cols, active):
         icon = _LABEL_ICONS.get(label, "🔵")
@@ -927,6 +1020,6 @@ if "error" not in stats_data:
             f'<div class="metric-card">'
             f'<div class="metric-value">{cnt:,}</div>'
             f'<div class="metric-label">{icon} {label}s</div>'
-            f'</div>',
+            f"</div>",
             unsafe_allow_html=True,
         )

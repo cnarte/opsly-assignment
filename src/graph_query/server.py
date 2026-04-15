@@ -1,4 +1,5 @@
 """Graph Query Agent MCP server — backed by gitnexus-agent."""
+
 from __future__ import annotations
 
 import json
@@ -20,14 +21,18 @@ settings = Settings()
 mcp = FastMCP("graph-query-agent", host="0.0.0.0", port=settings.GRAPH_QUERY_PORT)
 
 # Safety guard for Cypher injection prevention
-_SAFE_PREFIX = re.compile(r'^[A-Za-z][A-Za-z0-9_]*$')
+_SAFE_PREFIX = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 # Entity type mapping for LadybugDB id-prefix resolution
 _ENTITY_TYPE_MAP = {
-    "function": "Function", "functions": "Function",
-    "class": "Class", "classes": "Class",
-    "file": "File", "files": "File",
-    "folder": "Folder", "module": "File",
+    "function": "Function",
+    "functions": "Function",
+    "class": "Class",
+    "classes": "Class",
+    "file": "File",
+    "files": "File",
+    "folder": "Folder",
+    "module": "File",
 }
 
 
@@ -40,8 +45,14 @@ async def _call_gitnexus(tool: str, args: dict) -> dict:
     """Call a tool on the gitnexus-agent MCP server."""
     host = "gitnexus-agent" if os.path.exists("/.dockerenv") else "localhost"
     url = f"http://{host}:{settings.GITNEXUS_PORT}/mcp"
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=60.0), follow_redirects=True) as http_client:
-        async with streamable_http_client(url, http_client=http_client) as (read, write, _):
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(30.0, read=60.0), follow_redirects=True
+    ) as http_client:
+        async with streamable_http_client(url, http_client=http_client) as (
+            read,
+            write,
+            _,
+        ):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.call_tool(tool, args)
@@ -49,7 +60,11 @@ async def _call_gitnexus(tool: str, args: dict) -> dict:
                     try:
                         parsed = json.loads(result.content[0].text)
                         # Unwrap double-serialised responses: {"result": "<json string>"}
-                        if isinstance(parsed, dict) and list(parsed.keys()) == ["result"] and isinstance(parsed["result"], str):
+                        if (
+                            isinstance(parsed, dict)
+                            and list(parsed.keys()) == ["result"]
+                            and isinstance(parsed["result"], str)
+                        ):
                             inner = parsed["result"]
                             try:
                                 return json.loads(inner)
@@ -57,11 +72,15 @@ async def _call_gitnexus(tool: str, args: dict) -> dict:
                                 # Response truncated by MCP transport — try progressively
                                 # smaller slices at brace/bracket boundaries
                                 for pct in (0.9, 0.75, 0.5):
-                                    candidate = inner[:int(len(inner) * pct)]
-                                    last_brace = max(candidate.rfind('}'), candidate.rfind(']'))
+                                    candidate = inner[: int(len(inner) * pct)]
+                                    last_brace = max(
+                                        candidate.rfind("}"), candidate.rfind("]")
+                                    )
                                     if last_brace > 0:
                                         try:
-                                            return json.loads(candidate[:last_brace + 1])
+                                            return json.loads(
+                                                candidate[: last_brace + 1]
+                                            )
                                         except json.JSONDecodeError:
                                             pass
                                 return {"raw_truncated": inner[:4000]}
@@ -71,7 +90,18 @@ async def _call_gitnexus(tool: str, args: dict) -> dict:
                 return {}
 
 
+def _normalize_repo_id(repo_id: str) -> str:
+    if not repo_id:
+        return repo_id
+    if "/" in repo_id:
+        repo_id = repo_id.rsplit("/", 1)[-1]
+    if repo_id.endswith(".git"):
+        repo_id = repo_id[:-4]
+    return repo_id
+
+
 def _repo_args(base: dict, repo_id: str) -> dict:
+    repo_id = _normalize_repo_id(repo_id)
     return {**base, "repo": repo_id} if repo_id else base
 
 
@@ -107,14 +137,16 @@ def _parse_result(raw: dict) -> list[dict]:
 
 @mcp.tool()
 async def find_entity(name: str, entity_type: str = "", repo_id: str = "") -> dict:
-    """Locate a class, function, or module by name using hybrid search."""
+    """Locate a class, function, or module by hybrid search."""
     return await _call_gitnexus("query", _repo_args({"q": name}, repo_id))
 
 
 @mcp.tool()
 async def get_dependencies(entity_name: str, repo_id: str = "") -> dict:
     """Find what an entity depends on (outgoing relationships)."""
-    result = await _call_gitnexus("context", _repo_args({"symbol": entity_name}, repo_id))
+    result = await _call_gitnexus(
+        "context", _repo_args({"symbol": entity_name}, repo_id)
+    )
     return {
         "entity": entity_name,
         "dependencies": result.get("outgoing", result.get("refs", [])),
@@ -125,7 +157,9 @@ async def get_dependencies(entity_name: str, repo_id: str = "") -> dict:
 @mcp.tool()
 async def get_dependents(entity_name: str, repo_id: str = "") -> dict:
     """Find what depends on an entity (incoming relationships)."""
-    result = await _call_gitnexus("context", _repo_args({"symbol": entity_name}, repo_id))
+    result = await _call_gitnexus(
+        "context", _repo_args({"symbol": entity_name}, repo_id)
+    )
     return {
         "entity": entity_name,
         "dependents": result.get("incoming", []),
@@ -139,8 +173,8 @@ async def trace_imports(module_name: str, repo_id: str = "") -> dict:
     # LadybugDB: use n.name property match, not Cypher $params
     cypher = (
         f'MATCH (m) WHERE m.name = "{module_name}" '
-        f'MATCH (m)-[*1..5]->(t) WHERE t.name IS NOT NULL '
-        f'RETURN t.name AS name, t.filePath AS file_path LIMIT 20'
+        f"MATCH (m)-[*1..5]->(t) WHERE t.name IS NOT NULL "
+        f"RETURN t.name AS name, t.filePath AS file_path LIMIT 20"
     )
     result = await _call_gitnexus("cypher", _repo_args({"query_str": cypher}, repo_id))
     rows = _parse_result(result)
@@ -148,16 +182,23 @@ async def trace_imports(module_name: str, repo_id: str = "") -> dict:
 
 
 @mcp.tool()
-async def find_related(entity_name: str, relationship_type: str, repo_id: str = "") -> dict:
+async def find_related(
+    entity_name: str, relationship_type: str, repo_id: str = ""
+) -> dict:
     """Get entities related by a specific relationship type."""
     cypher = (
         f'MATCH (n) WHERE n.name = "{entity_name}" '
-        f'MATCH (n)-[r]->(t) WHERE t.name IS NOT NULL '
-        f'RETURN n.name AS source, t.name AS target, t.filePath AS file_path LIMIT 50'
+        f"MATCH (n)-[r]->(t) WHERE t.name IS NOT NULL "
+        f"RETURN n.name AS source, t.name AS target, t.filePath AS file_path LIMIT 50"
     )
     result = await _call_gitnexus("cypher", _repo_args({"query_str": cypher}, repo_id))
     rows = _parse_result(result)
-    return {"entity": entity_name, "relationship": relationship_type, "results": rows, "count": len(rows)}
+    return {
+        "entity": entity_name,
+        "relationship": relationship_type,
+        "results": rows,
+        "count": len(rows),
+    }
 
 
 @mcp.tool()
@@ -183,12 +224,12 @@ async def analyze_impact(symbol_name: str, depth: int = 2, repo_id: str = "") ->
     cap_depth = max(1, min(int(depth), 4))
     cypher = (
         f'MATCH (target) WHERE target.name = "{safe_name}" '
-        f'WITH target LIMIT 1 '
-        f'MATCH path = (target)<-[*1..{cap_depth}]-(dependent) '
-        f'WHERE dependent.name IS NOT NULL AND dependent.id <> target.id '
-        f'RETURN DISTINCT dependent.name AS name, dependent.filePath AS file_path, '
-        f'dependent.id AS id, length(path) AS depth_level '
-        f'ORDER BY depth_level, name LIMIT 100'
+        f"WITH target LIMIT 1 "
+        f"MATCH path = (target)<-[*1..{cap_depth}]-(dependent) "
+        f"WHERE dependent.name IS NOT NULL AND dependent.id <> target.id "
+        f"RETURN DISTINCT dependent.name AS name, dependent.filePath AS file_path, "
+        f"dependent.id AS id, length(path) AS depth_level "
+        f"ORDER BY depth_level, name LIMIT 100"
     )
     result = await _call_gitnexus("cypher", _repo_args({"query_str": cypher}, repo_id))
     rows = _parse_result(result)
@@ -199,7 +240,13 @@ async def analyze_impact(symbol_name: str, depth: int = 2, repo_id: str = "") ->
         if lvl not in by_depth:
             by_depth[lvl] = []
         if len(by_depth[lvl]) < 20:
-            by_depth[lvl].append({"name": row.get("name"), "file_path": row.get("file_path"), "id": row.get("id")})
+            by_depth[lvl].append(
+                {
+                    "name": row.get("name"),
+                    "file_path": row.get("file_path"),
+                    "id": row.get("id"),
+                }
+            )
 
     return {
         "symbol": symbol_name,
@@ -223,7 +270,7 @@ async def list_entities(entity_type: str, limit: int = 50, repo_id: str = "") ->
     cap = min(limit, 200)
     cypher = (
         f'MATCH (n) WHERE n.id STARTS WITH "{prefix}:" AND n.name IS NOT NULL '
-        f'RETURN n.name AS name, n.filePath AS file_path LIMIT {cap}'
+        f"RETURN n.name AS name, n.filePath AS file_path LIMIT {cap}"
     )
     result = await _call_gitnexus("cypher", _repo_args({"query_str": cypher}, repo_id))
     rows = _parse_result(result)
@@ -242,8 +289,8 @@ async def list_entities_tree(entity_type: str, repo_id: str = "") -> dict:
     # Aggregate in the DB — one row per file with count, avoids transmitting thousands of rows
     cypher = (
         f'MATCH (n) WHERE n.id STARTS WITH "{prefix}:" AND n.name IS NOT NULL '
-        f'WITH n.filePath AS file_path, count(*) AS cnt '
-        f'RETURN file_path, cnt ORDER BY file_path LIMIT 500'
+        f"WITH n.filePath AS file_path, count(*) AS cnt "
+        f"RETURN file_path, cnt ORDER BY file_path LIMIT 500"
     )
     result = await _call_gitnexus("cypher", _repo_args({"query_str": cypher}, repo_id))
     rows = _parse_result(result)

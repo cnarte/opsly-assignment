@@ -93,30 +93,33 @@ async def _call_mcp_tool(
     response from long-running tools (e.g. route_to_agents, which runs a
     multi-step LangGraph pipeline) isn't cut short by httpx's default 30-second
     read timeout.
+
+    NOTE: asyncio.timeout() is NOT used here because it can cancel the operation
+    mid-stream, leaving the MCP connection in an inconsistent state. Instead,
+    we rely on httpx's timeout which is cleaner for HTTP-level cancellation.
     """
     import json
     import httpx
 
     try:
-        async with asyncio.timeout(timeout):
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(30.0, read=timeout),
-                follow_redirects=True,
-            ) as http_client:
-                async with streamable_http_client(url, http_client=http_client) as (read, write, _):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        result = await session.call_tool(tool_name, arguments)
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, read=timeout),
+            follow_redirects=True,
+        ) as http_client:
+            async with streamable_http_client(url, http_client=http_client) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, arguments)
 
-                        # result.content is a list of content blocks
-                        if result.content:
-                            text = result.content[0].text
-                            try:
-                                return json.loads(text)
-                            except (json.JSONDecodeError, TypeError):
-                                return {"result": text}
-                        return {}
-    except asyncio.TimeoutError:
+                    # result.content is a list of content blocks
+                    if result.content:
+                        text = result.content[0].text
+                        try:
+                            return json.loads(text)
+                        except (json.JSONDecodeError, TypeError):
+                            return {"result": text}
+                    return {}
+    except httpx.TimeoutException:
         logger.error("MCP call to %s/%s timed out after %ss", url, tool_name, timeout)
         return {"error": f"Timeout calling {tool_name}"}
     except Exception as exc:

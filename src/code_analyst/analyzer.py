@@ -19,6 +19,7 @@ async def _locate_symbol(symbol_name: str, repo_id: str = "") -> dict:
     from mcp.client.streamable_http import streamablehttp_client
     from mcp import ClientSession
     from src.shared.settings import Settings as _Settings
+
     _settings = _Settings()
 
     host = "gitnexus-agent" if _os.path.exists("/.dockerenv") else "localhost"
@@ -49,6 +50,7 @@ async def explain_entity(entity_name: str, model: str = "") -> str:
     from langchain_openrouter import ChatOpenRouter
     from langchain_openai import ChatOpenAI
     from src.shared.settings import Settings as _Settings
+
     _settings = _Settings()
 
     location = await _locate_symbol(entity_name)
@@ -70,6 +72,9 @@ async def explain_entity(entity_name: str, model: str = "") -> str:
         prompt += f"\n\nSource code:\n```python\n{source_context}\n```"
 
     resolved = model or _settings.OPENROUTER_MODEL
+    # Skip invalid model values like "default"
+    if resolved in ("", "default", "none"):
+        resolved = _settings.OPENROUTER_MODEL
     if resolved.startswith("lmstudio:"):
         lms_model = resolved.removeprefix("lmstudio:")
         llm = ChatOpenAI(
@@ -85,10 +90,14 @@ async def explain_entity(entity_name: str, model: str = "") -> str:
             temperature=0,
         )
 
-    response = await llm.ainvoke([
-        SystemMessage(content="You are a code analysis expert. Explain clearly and concisely."),
-        HumanMessage(content=prompt),
-    ])
+    response = await llm.ainvoke(
+        [
+            SystemMessage(
+                content="You are a code analysis expert. Explain clearly and concisely."
+            ),
+            HumanMessage(content=prompt),
+        ]
+    )
     return response.content
 
 
@@ -174,7 +183,9 @@ class CodeAnalyzer:
             f"Source code:\n```python\n{source}\n```"
         )
 
-    def _build_compare_prompt(self, source_a: str, source_b: str, name_a: str, name_b: str) -> str:
+    def _build_compare_prompt(
+        self, source_a: str, source_b: str, name_a: str, name_b: str
+    ) -> str:
         return (
             f"Compare the following two Python code entities: '{name_a}' and '{name_b}'.\n"
             f"Highlight similarities, differences, strengths, and weaknesses of each.\n\n"
@@ -200,7 +211,9 @@ class CodeAnalyzer:
             "analysis": analysis,
         }
 
-    async def explain_implementation(self, source: str, entity_name: str) -> dict[str, Any]:
+    async def explain_implementation(
+        self, source: str, entity_name: str
+    ) -> dict[str, Any]:
         """Generate natural language explanation of code."""
         prompt = self._build_explain_prompt(source, {"name": entity_name})
         explanation = await self._invoke_llm(prompt)
