@@ -133,24 +133,24 @@ async def _call_mcp_agent(
     # Default 90s — graph-query calls gitnexus-agent with a 60s read timeout, so
     # we need at least 90s here to avoid closing the connection while graph-query
     # is still waiting for gitnexus (which causes the ASGI ClosedResourceError).
-    timeout_s = timeout or getattr(settings, "MCP_CALL_TIMEOUT_S", 90)
+    timeout_s = timeout or getattr(settings, "MCP_CALL_TIMEOUT_S", 300)
 
     try:
-        async with asyncio.timeout(timeout_s):
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(30.0, read=timeout_s),
-                follow_redirects=True,
-            ) as http_client:
-                async with streamable_http_client(url, http_client=http_client) as (read, write, _):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        result = await session.call_tool(tool_name, tool_args)
-                        if result.content:
-                            try:
-                                return json.loads(result.content[0].text)
-                            except (json.JSONDecodeError, TypeError):
-                                return {"result": result.content[0].text}
-                        return {}
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout_s, read=timeout_s, pool=timeout_s, write=timeout_s),
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        ) as http_client:
+            async with streamable_http_client(url, http_client=http_client) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, tool_args)
+                    if result.content:
+                        try:
+                            return json.loads(result.content[0].text)
+                        except (json.JSONDecodeError, TypeError):
+                            return {"result": result.content[0].text}
+                    return {}
     except Exception as exc:
         logger.warning("MCP call %s/%s failed: %s", agent_name, tool_name, exc)
         return {"error": f"{agent_name}/{tool_name} failed: {exc}"}

@@ -46,7 +46,9 @@ async def _call_gitnexus(tool: str, args: dict) -> dict:
     host = "gitnexus-agent" if os.path.exists("/.dockerenv") else "localhost"
     url = f"http://{host}:{settings.GITNEXUS_PORT}/mcp"
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(30.0, read=60.0), follow_redirects=True
+        timeout=httpx.Timeout(300.0, read=300.0, pool=300.0, write=300.0),
+        follow_redirects=True,
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
     ) as http_client:
         async with streamable_http_client(url, http_client=http_client) as (
             read,
