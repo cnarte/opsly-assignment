@@ -8,6 +8,23 @@ import os
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+
+def _msg_text(msg: AIMessage) -> str:
+    """Extract plain text from an AIMessage.content.
+
+    ChatAnthropic returns content as a list of content blocks
+    [{'type': 'text', 'text': '...', 'index': 0}], while ChatOpenRouter
+    and ChatOpenAI return a plain string. Normalise to string.
+    """
+    content = getattr(msg, "content", "") or ""
+    if isinstance(content, list):
+        return "".join(
+            b.get("text", "") if isinstance(b, dict) else str(b) for b in content
+        )
+    return str(content)
+
+
 from langchain_openrouter import ChatOpenRouter
 from langchain_openai import ChatOpenAI
 from langgraph.config import get_stream_writer
@@ -49,11 +66,15 @@ def get_langfuse_callback(session_id: str = "", user_id: str = ""):
 
 
 def _get_llm(model: str = ""):
-    """Return a ChatOpenRouter or ChatOpenAI (LM Studio), using model override when provided.
+    """Return a ChatOpenRouter, ChatOpenAI (LM Studio), or ChatAnthropic LLM.
 
-    Model IDs starting with 'lmstudio:' are routed to LM Studio's local server
-    via its OpenAI-compatible API. All others use ChatOpenRouter.
+    Routing by prefix:
+      'lmstudio:'  → LM Studio (OpenAI-compatible, no rate limits)
+      'anthropic:'  → Anthropic direct API (fast, uses ANTHROPIC_API_KEY)
+      anything else → OpenRouter (openrouter_api_key)
     """
+    from langchain_anthropic import ChatAnthropic
+
     resolved = model or settings.OPENROUTER_MODEL
     if resolved.startswith("lmstudio:"):
         lms_model = resolved.removeprefix("lmstudio:")
@@ -62,6 +83,14 @@ def _get_llm(model: str = ""):
             base_url=settings.LMSTUDIO_BASE_URL,
             api_key="lm-studio",
             temperature=0,
+        )
+    if resolved.startswith("anthropic:"):
+        anthropic_model = resolved.removeprefix("anthropic:")
+        return ChatAnthropic(
+            model=anthropic_model,
+            anthropic_api_key=settings.ANTHROPIC_API_KEY,
+            temperature=0,
+            streaming=True,
         )
     return ChatOpenRouter(
         model=resolved,
@@ -96,7 +125,7 @@ async def _compress_tool_result(
                 HumanMessage(content="Summarise the above."),
             ]
         )
-        return response.content
+        return _msg_text(response)
     except Exception as exc:
         logger.warning("Tool result compression failed for %s: %s", tool_name, exc)
         hint = (
@@ -642,14 +671,11 @@ async def persist_turn(state: OrchestratorState) -> dict:
                 current_input = content
                 break
     user_msg = current_input
-    ai_msg = next(
-        (
-            m.content
-            for m in reversed(messages)
-            if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None)
-        ),
-        "",
-    )
+    ai_msg = ""
+    for m in reversed(messages):
+        if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None):
+            ai_msg = _msg_text(m)
+            break
 
     logger.info("persist_turn RESULT: user_msg=%.50s ai_msg=%.50s", user_msg, ai_msg)
 

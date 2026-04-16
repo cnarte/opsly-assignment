@@ -62,11 +62,14 @@ LMSTUDIO_DEFAULT_MODELS = [
     ("LM Studio: custom…", "__lmstudio_custom__"),
 ]
 
+ANTHROPIC_MODELS = [
+    ("── Anthropic (direct) ──", None),
+    ("Claude Sonnet 4.6 (fast)", "anthropic:claude-sonnet-4-6"),
+    ("Claude Opus 4.6 (smartest)", "anthropic:claude-opus-4-6"),
+    ("Claude Haiku 4.5 (fastest)", "anthropic:claude-haiku-4-5-20251001"),
+]
+
 OPENROUTER_MODELS = [
-    # OpenRouter models (paid, requires credits)
-    ("── OpenRouter (paid) ──", None),
-    ("Claude Sonnet 4.6 (fast, paid)", "anthropic/claude-sonnet-4-6"),
-    ("Claude Haiku 4.5 (fastest, paid)", "anthropic/claude-haiku-4-5-20251001"),
     # OpenRouter models (free, rate-limited)
     ("── OpenRouter (free) ──", None),
     ("GPT-OSS 20B (fast, free)", "openai/gpt-oss-20b:free"),
@@ -99,7 +102,12 @@ def fetch_lmstudio_models() -> list[tuple[str, str | None]]:
 def _build_available_models() -> list[tuple[str, str | None]]:
     """Combine server-default, LM Studio, and OpenRouter entries."""
     lms = st.session_state.get("lmstudio_models") or LMSTUDIO_DEFAULT_MODELS
-    return [("Server default (env OPENROUTER_MODEL)", "")] + lms + OPENROUTER_MODELS
+    return (
+        [("Server default (env OPENROUTER_MODEL)", "")]
+        + lms
+        + ANTHROPIC_MODELS
+        + OPENROUTER_MODELS
+    )
 
 
 # ---------------------------------------------------------------------------

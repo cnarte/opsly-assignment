@@ -5,6 +5,7 @@ from __future__ import annotations
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import os
 
+
 class Settings(BaseSettings):
     """Centralised configuration for all services."""
 
@@ -22,6 +23,9 @@ class Settings(BaseSettings):
 
     # LLM / LM Studio (local models via OpenAI-compatible API, no rate limiting)
     LMSTUDIO_BASE_URL: str = "http://host.docker.internal:1234/v1"
+
+    # LLM / Anthropic (direct API — faster than OpenRouter, uses your own credits)
+    ANTHROPIC_API_KEY: str = ""
 
     # OpenAI Embeddings
     OPENAI_API_KEY: str = ""
@@ -56,8 +60,8 @@ class Settings(BaseSettings):
     MCP_CALL_RETRIES: int = 1
 
     # Langfuse tracing (optional — leave blank to disable)
-    LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY","")
-    LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY","")
+    LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+    LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
     # Accept both LANGFUSE_BASE_URL (Langfuse's own name) and LANGFUSE_HOST
     LANGFUSE_BASE_URL: str = os.getenv("LANGFUSE_BASE_URL", "")
     LANGFUSE_HOST: str = ""  # alias — if set, overrides LANGFUSE_BASE_URL
