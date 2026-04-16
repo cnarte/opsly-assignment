@@ -184,7 +184,7 @@ async def route_to_agents(
     thread_id = session_id or str(uuid.uuid4())
     lf_cb = get_langfuse_callback(session_id=session_id)
     callbacks = [lf_cb] if lf_cb else []
-    config = {"recursion_limit": 10, "configurable": {"thread_id": thread_id}, "callbacks": callbacks}
+    config = {"recursion_limit": 50, "configurable": {"thread_id": thread_id}, "callbacks": callbacks}
     try:
         logger.info("Starting graph invocation")
         final_state = await _graph.ainvoke(state, config=config)

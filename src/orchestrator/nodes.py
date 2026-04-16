@@ -208,9 +208,9 @@ def build_tools(repo_id: str = "", model: str = "") -> list:
          {"entity_name": {"type": "string", "description": "Entity name"}, "repo_id": {"type": "string"}}),
         ("get_dependents", "Find what depends on an entity (incoming relationships).",
          {"entity_name": {"type": "string", "description": "Entity name"}, "repo_id": {"type": "string"}}),
-        ("trace_imports", "Follow the import chain for a module.",
-         {"module_name": {"type": "string"}, "repo_id": {"type": "string"}}),
-        ("find_related", "Get entities related by a specific relationship type (CALLS, INHERITS_FROM, IMPORTS, DECORATED_BY).",
+        ("trace_imports", "Find what a module/file calls or imports. Accepts a symbol name (e.g. 'APIRouter') or file path fragment (e.g. 'routing' or 'fastapi/routing.py').",
+         {"module_name": {"type": "string", "description": "Symbol name or file path fragment"}, "repo_id": {"type": "string"}}),
+        ("find_related", "Get entities related by a specific relationship type (CALLS, MEMBER_OF, STEP_IN_PROCESS, ACCESSES, DEFINES, HAS_METHOD).",
          {"entity_name": {"type": "string"}, "relationship_type": {"type": "string"}, "repo_id": {"type": "string"}}),
         ("execute_query", "Run a raw Cypher query against LadybugDB (read-only).",
          {"cypher": {"type": "string", "description": "Cypher query string"}}),
@@ -225,10 +225,11 @@ def build_tools(repo_id: str = "", model: str = "") -> list:
          "Use this instead of list_entities for 'get all X' queries — returns a compact summary safe for large repos.",
          {"entity_type": {"type": "string", "description": "Function, Class, File, Folder"},
           "repo_id": {"type": "string"}}),
-        ("analyze_file", "Read and analyze a file directly for decorators, imports, classes, functions. "
-         "Bypasses symbol-search limitations by reading raw file content.",
+        ("analyze_file", "Analyze a file using the graph database — extracts decorators, imports, classes, functions. "
+         "Reads node content from graph (no filesystem access needed). Use this for decorator/pattern analysis.",
          {"file_path": {"type": "string", "description": "e.g., fastapi/routing.py"},
-          "focus": {"type": "string", "description": "What to analyze: decorators, imports, classes, functions"}}),
+          "focus": {"type": "string", "description": "What to analyze: decorators, imports, classes, functions, content"},
+          "repo_id": {"type": "string", "description": "Optional repo filter"}}),
     ]:
         tools.append(_make_mcp_tool("graph_query", gq_port, name, desc, schema))
 
