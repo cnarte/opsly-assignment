@@ -295,8 +295,8 @@ if "indexed_repos" not in st.session_state:
     st.session_state.indexed_repos = []
 if "active_repo_id" not in st.session_state:
     st.session_state.active_repo_id = ""
-if "selected_model" not in st.session_state:
-    st.session_state.selected_model = ""
+    if "selected_model" not in st.session_state:
+        st.session_state.selected_model = ""
 if "available_repos" not in st.session_state:
     st.session_state.available_repos = []
 

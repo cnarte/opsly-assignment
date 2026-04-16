@@ -66,34 +66,32 @@ def get_langfuse_callback(session_id: str = "", user_id: str = ""):
 
 
 def _get_llm(model: str = ""):
-    """Return a ChatOpenRouter, ChatOpenAI (LM Studio), or ChatAnthropic LLM.
-
-    Routing by prefix:
-      'lmstudio:'  → LM Studio (OpenAI-compatible, no rate limits)
-      'anthropic:'  → Anthropic direct API (fast, uses ANTHROPIC_API_KEY)
-      anything else → OpenRouter (openrouter_api_key)
-    """
     from langchain_anthropic import ChatAnthropic
 
-    resolved = model or settings.OPENROUTER_MODEL
-    if resolved.startswith("lmstudio:"):
-        lms_model = resolved.removeprefix("lmstudio:")
-        return ChatOpenAI(
-            model=lms_model,
-            base_url=settings.LMSTUDIO_BASE_URL,
-            api_key="lm-studio",
-            temperature=0,
-        )
-    if resolved.startswith("anthropic:"):
-        anthropic_model = resolved.removeprefix("anthropic:")
+    if model:
+        provider, _, model_name = model.partition(":")
+        resolved_provider = provider or settings.ORCHESTRATOR_PROVIDER
+        resolved_model = model_name or settings.ORCHESTRATOR_MODEL
+    else:
+        resolved_provider = settings.ORCHESTRATOR_PROVIDER
+        resolved_model = settings.ORCHESTRATOR_MODEL
+
+    if resolved_provider == "anthropic":
         return ChatAnthropic(
-            model=anthropic_model,
+            model=resolved_model,
             anthropic_api_key=settings.ANTHROPIC_API_KEY,
             temperature=0,
             streaming=True,
         )
+    if resolved_provider == "lmstudio":
+        return ChatOpenAI(
+            model=resolved_model,
+            base_url=settings.LMSTUDIO_BASE_URL,
+            api_key="lm-studio",
+            temperature=0,
+        )
     return ChatOpenRouter(
-        model=resolved,
+        model=settings.OPENROUTER_MODEL,
         openrouter_api_key=settings.OPENROUTER_API_KEY,
         temperature=0,
         streaming=True,
@@ -424,10 +422,11 @@ def build_tools(repo_id: str = "", model: str = "") -> list:
 
 
 async def inject_history(state: OrchestratorState) -> dict:
-    """Prepend conversation history from memory agent to state messages.
+    """Prepare messages for the ReAct agent.
 
-    Also marks the original current-user message so persist_turn can distinguish
-    it from injected-history HumanMessages when extracting the current turn's user input.
+    If the MemorySaver checkpoint has already restored prior turn messages, skip
+    Redis history injection to avoid duplicating them. The checkpoint is the
+    authoritative source for conversation history within a session.
     """
     session_id = state.get("session_id", "")
     current = list(state.get("messages", []))
@@ -438,8 +437,18 @@ async def inject_history(state: OrchestratorState) -> dict:
     # which avoids accidentally picking up an injected-history HumanMessage.
     if current and isinstance(current[0], HumanMessage):
         current_user_msg = current[0].content
-        # Tag the original so it's identifiable if needed
         current[0].content = f"[CURRENT_TURN] {current[0].content}"
+
+    # Skip Redis history if checkpoint already populated the state with prior turns.
+    # MemorySaver restores ALL previous messages at the start of each turn, so
+    # injecting Redis history would duplicate them and grow the message list
+    # unboundedly (50 → 53 → 56 → 60 → ...), exhausting the context window.
+    if len(current) > 1:
+        logger.info(
+            "inject_history: checkpoint has %d messages, skipping Redis history",
+            len(current),
+        )
+        return {"messages": current, "_current_user_msg": current_user_msg}
 
     if not session_id:
         return {"messages": current}
@@ -452,15 +461,12 @@ async def inject_history(state: OrchestratorState) -> dict:
         timeout=10,
     )
 
-    prior: list = (
-        history_result.get("messages", history_result.get("context", [])) or []
+    prior: list = history_result.get(
+        "messages", history_result.get("context", []) or []
     )
     history_messages = []
-    # Cap AI response history to avoid overwhelming local models' context windows.
-    # Tool schemas from bind_tools already cost ~1500 tokens; long prior AI answers
-    # push the total past the effective generation budget and cause empty responses.
     _MAX_TURNS = 6
-    _MAX_AI_CHARS = 600  # ~150 tokens — enough for context without crowding
+    _MAX_AI_CHARS = 600
     for turn in prior[-_MAX_TURNS:]:
         role = turn.get("role", "")
         content = turn.get("content", "")

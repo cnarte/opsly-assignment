@@ -15,11 +15,12 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # LLM / OpenRouter
     OPENROUTER_API_KEY: str = ""
-    # Llama 3.1 8B is ~15x faster than Nemotron 120B on OpenRouter free tier
-    # (3-8s vs 60-90s per call). Override via OPENROUTER_MODEL env var or UI dropdown.
     OPENROUTER_MODEL: str = "meta-llama/llama-3.1-8b-instruct:free"
+
+    # Orchestrator LLM config
+    ORCHESTRATOR_PROVIDER: str = "anthropic"
+    ORCHESTRATOR_MODEL: str = "claude-sonnet-4-6"
 
     # LLM / LM Studio (local models via OpenAI-compatible API, no rate limiting)
     LMSTUDIO_BASE_URL: str = "http://host.docker.internal:1234/v1"

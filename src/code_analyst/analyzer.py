@@ -116,25 +116,24 @@ class CodeAnalyzer:
             from langchain_openai import ChatOpenAI
             from langchain_anthropic import ChatAnthropic
 
-            model = self._settings.OPENROUTER_MODEL
-            if model.startswith("lmstudio:"):
-                lms_model = model.removeprefix("lmstudio:")
+            provider = self._settings.ORCHESTRATOR_PROVIDER
+            model = self._settings.ORCHESTRATOR_MODEL
+            if provider == "anthropic":
+                self._llm = ChatAnthropic(
+                    model=model,
+                    anthropic_api_key=self._settings.ANTHROPIC_API_KEY,
+                    temperature=0,
+                )
+            elif provider == "lmstudio":
                 self._llm = ChatOpenAI(
-                    model=lms_model,
+                    model=model,
                     base_url=self._settings.LMSTUDIO_BASE_URL,
                     api_key="lm-studio",
                     temperature=0,
                 )
-            elif model.startswith("anthropic:"):
-                anthropic_model = model.removeprefix("anthropic:")
-                self._llm = ChatAnthropic(
-                    model=anthropic_model,
-                    anthropic_api_key=self._settings.ANTHROPIC_API_KEY,
-                    temperature=0,
-                )
             else:
                 self._llm = ChatOpenRouter(
-                    model=model,
+                    model=self._settings.OPENROUTER_MODEL,
                     openrouter_api_key=self._settings.OPENROUTER_API_KEY,
                 )
         return self._llm
