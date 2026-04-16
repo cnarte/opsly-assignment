@@ -38,8 +38,8 @@ def get_langfuse_callback(session_id: str = "", user_id: str = ""):
             session_id=session_id or None,
             user_id=user_id or None,
         )
-    except Exception:
-        logger.warning("Langfuse callback unavailable — tracing disabled", exc_info=False)
+    except Exception as e:
+        logger.warning(f"Langfuse callback unavailable — tracing disabled \n Error {e} ", exc_info=True)
         return None
 
 
