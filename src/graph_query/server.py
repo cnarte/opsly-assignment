@@ -358,15 +358,19 @@ async def analyze_file(file_path: str, focus: str = "") -> dict:
                     with open(candidate, "r") as f:
                         content = f.read()
                     analysis["found"] = True
-                    analysis["content"] = content
                     analysis["repo"] = repo_dir
+                    analysis["size_bytes"] = len(content)
 
-                    # Basic pattern extraction
+                    # Extract patterns — don't return raw content (too large, gets truncated)
                     import re
-                    analysis["decorators"] = re.findall(r"@\w+[\w\.\(]*", content)
+                    analysis["decorators"] = sorted(set(re.findall(r"@[\w\.]+", content)))
                     analysis["classes"] = re.findall(r"^class\s+(\w+)", content, re.MULTILINE)
                     analysis["functions"] = re.findall(r"^(?:async\s+)?def\s+(\w+)", content, re.MULTILINE)
                     analysis["imports"] = re.findall(r"^(?:from|import)\s+(.+)$", content, re.MULTILINE)
+
+                    # Include content only when explicitly requested and file is small
+                    if focus == "content" or (focus == "" and len(content) < 8000):
+                        analysis["content"] = content
 
                     return analysis
                 except Exception as e:
