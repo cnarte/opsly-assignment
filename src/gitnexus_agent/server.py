@@ -6,6 +6,8 @@ import logging
 import re
 from pathlib import Path
 
+import asyncio
+import tempfile
 import anyio
 from mcp.server.fastmcp import FastMCP
 
@@ -27,25 +29,43 @@ mcp = FastMCP(
 
 
 async def _run_gitnexus(*args: str) -> dict:
-    """Run `gitnexus <args>` and return a result dict."""
+    """Run `gitnexus <args>` and return a result dict.
+
+    Routes stdout to a temp file to bypass the 64 KB pipe-buffer limit that
+    causes Node.js (gitnexus) to truncate output when connected to a pipe.
+    """
     cmd = ["gitnexus", *args]
     try:
-        result = await anyio.run_process(cmd, check=False)
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        with open(tmp_path, "wb") as out_fh:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=out_fh,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr_bytes = await proc.communicate()
+
+        with open(tmp_path, "rb") as f:
+            stdout_bytes = f.read()
+
+        import os as _os
+        _os.unlink(tmp_path)
     except Exception as exc:
         return {"error": str(exc)}
 
-    stdout = result.stdout.decode("utf-8", errors="replace").strip()
-    stderr = result.stderr.decode("utf-8", errors="replace").strip()
+    stdout = stdout_bytes.decode("utf-8", errors="replace").strip()
+    stderr = stderr_bytes.decode("utf-8", errors="replace").strip() if stderr_bytes else ""
 
-    if result.returncode != 0:
-        return {"error": stderr or stdout or f"gitnexus exited {result.returncode}"}
+    if proc.returncode != 0:
+        return {"error": stderr or stdout or f"gitnexus exited {proc.returncode}"}
 
-    text = stdout
-    # Try to parse JSON output; fall back to raw text
+    # Try to parse JSON output; fall back to raw text wrapper
     try:
-        return json.loads(text)
+        return json.loads(stdout)
     except (json.JSONDecodeError, TypeError):
-        return {"result": text}
+        return {"result": stdout}
 
 
 # ---------------------------------------------------------------------------

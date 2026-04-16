@@ -1,4 +1,5 @@
 """ReAct node functions for the orchestrator LangGraph."""
+
 from __future__ import annotations
 
 import json
@@ -25,22 +26,21 @@ settings = Settings()
 
 
 def get_langfuse_callback(session_id: str = "", user_id: str = ""):
-    """Return a Langfuse LangChain callback handler, or None if not configured."""
+    """Return a Langfuse LangChain callback handler, or None if not configured.
+
+    Note: Langfuse 3.x changed the callback API. This is currently disabled
+    until we integrate with the new LangChain callback interface or use
+    Langfuse's @observe decorator pattern instead.
+    """
     if not settings.LANGFUSE_PUBLIC_KEY or not settings.LANGFUSE_SECRET_KEY:
         return None
-    try:
-        from langfuse.callback import CallbackHandler  # langfuse >= 3.x
-        host = settings.LANGFUSE_HOST or settings.LANGFUSE_BASE_URL
-        return CallbackHandler(
-            public_key=settings.LANGFUSE_PUBLIC_KEY,
-            secret_key=settings.LANGFUSE_SECRET_KEY,
-            host=host,
-            session_id=session_id or None,
-            user_id=user_id or None,
-        )
-    except Exception as e:
-        logger.warning(f"Langfuse callback unavailable — tracing disabled \n Error {e} ", exc_info=True)
-        return None
+    # TODO: Integrate with langfuse 3.x callback handler for LangChain
+    # The old CallbackHandler from langfuse.callback is no longer available.
+    # Options: Use Langfuse.get_client() with @observe or integrate with LangChain callbacks differently.
+    logger.debug(
+        "Langfuse callback not yet integrated with langfuse 3.x — tracing disabled"
+    )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +71,9 @@ def _get_llm(model: str = ""):
     )
 
 
-async def _compress_tool_result(result: str, tool_name: str = "", max_chars: int = 8000) -> str:
+async def _compress_tool_result(
+    result: str, tool_name: str = "", max_chars: int = 8000
+) -> str:
     """LLM-summarise tool results that are too large for the agent context window.
 
     Results under max_chars pass through unchanged (no LLM call, no latency).
@@ -88,7 +90,12 @@ async def _compress_tool_result(result: str, tool_name: str = "", max_chars: int
     )
     try:
         llm = _get_llm()
-        response = await llm.ainvoke([SystemMessage(content=prompt), HumanMessage(content="Summarise the above.")])
+        response = await llm.ainvoke(
+            [
+                SystemMessage(content=prompt),
+                HumanMessage(content="Summarise the above."),
+            ]
+        )
         return response.content
     except Exception as exc:
         logger.warning("Tool result compression failed for %s: %s", tool_name, exc)
@@ -128,7 +135,11 @@ async def _call_mcp_agent(
         settings.GITNEXUS_PORT: "gitnexus-agent",
     }
 
-    host = _PORT_TO_SERVICE.get(port, "localhost") if os.path.exists("/.dockerenv") else "localhost"
+    host = (
+        _PORT_TO_SERVICE.get(port, "localhost")
+        if os.path.exists("/.dockerenv")
+        else "localhost"
+    )
     url = f"http://{host}:{port}/mcp"
     # Default 90s — graph-query calls gitnexus-agent with a 60s read timeout, so
     # we need at least 90s here to avoid closing the connection while graph-query
@@ -137,11 +148,17 @@ async def _call_mcp_agent(
 
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout_s, read=timeout_s, pool=timeout_s, write=timeout_s),
+            timeout=httpx.Timeout(
+                timeout_s, read=timeout_s, pool=timeout_s, write=timeout_s
+            ),
             follow_redirects=True,
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         ) as http_client:
-            async with streamable_http_client(url, http_client=http_client) as (read, write, _):
+            async with streamable_http_client(url, http_client=http_client) as (
+                read,
+                write,
+                _,
+            ):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     result = await session.call_tool(tool_name, tool_args)
@@ -169,15 +186,25 @@ def _make_mcp_tool(agent: str, port: int, name: str, description: str, schema: d
     fields = {}
     for k, v in schema.items():
         if v.get("type") == "string":
-            fields[k] = (str, pydantic.Field(default="", description=v.get("description", "")))
+            fields[k] = (
+                str,
+                pydantic.Field(default="", description=v.get("description", "")),
+            )
         elif v.get("type") == "integer":
-            fields[k] = (int, pydantic.Field(default=v.get("default", 0), description=v.get("description", "")))
+            fields[k] = (
+                int,
+                pydantic.Field(
+                    default=v.get("default", 0), description=v.get("description", "")
+                ),
+            )
         else:
             fields[k] = (Any, pydantic.Field(default=None))
     ArgsModel = pydantic.create_model(f"{name}_args", **fields)
 
     async def _run(**kwargs: Any) -> str:
-        result = await _call_mcp_agent(agent, port, name, {k: v for k, v in kwargs.items() if v not in (None, "")})
+        result = await _call_mcp_agent(
+            agent, port, name, {k: v for k, v in kwargs.items() if v not in (None, "")}
+        )
         raw = json.dumps(result, default=str)
         return await _compress_tool_result(raw, tool_name=name)
 
@@ -202,52 +229,159 @@ def build_tools(repo_id: str = "", model: str = "") -> list:
     gq_port = settings.GRAPH_QUERY_PORT
 
     for name, desc, schema in [
-        ("find_entity", "Locate a class, function, or module by name using hybrid search.",
-         {"name": {"type": "string", "description": "Entity name"}, "entity_type": {"type": "string", "description": "Optional: Class, Function, Method"}, "repo_id": {"type": "string", "description": "Repo scope"}}),
-        ("get_dependencies", "Find what an entity depends on (outgoing relationships).",
-         {"entity_name": {"type": "string", "description": "Entity name"}, "repo_id": {"type": "string"}}),
-        ("get_dependents", "Find what depends on an entity (incoming relationships).",
-         {"entity_name": {"type": "string", "description": "Entity name"}, "repo_id": {"type": "string"}}),
-        ("trace_imports", "Find what a module/file calls or imports. Accepts a symbol name (e.g. 'APIRouter') or file path fragment (e.g. 'routing' or 'fastapi/routing.py').",
-         {"module_name": {"type": "string", "description": "Symbol name or file path fragment"}, "repo_id": {"type": "string"}}),
-        ("find_related", "Get entities related by a specific relationship type (CALLS, MEMBER_OF, STEP_IN_PROCESS, ACCESSES, DEFINES, HAS_METHOD).",
-         {"entity_name": {"type": "string"}, "relationship_type": {"type": "string"}, "repo_id": {"type": "string"}}),
-        ("execute_query", "Run a raw Cypher query against LadybugDB (read-only).",
-         {"cypher": {"type": "string", "description": "Cypher query string"}}),
-        ("get_symbol_context", "360-degree view of a symbol: callers, callees, imports, process participation. BEST tool for lifecycle/flow questions.",
-         {"symbol_name": {"type": "string"}, "repo_id": {"type": "string"}}),
-        ("analyze_impact", "Blast-radius: what breaks if this symbol changes.",
-         {"symbol_name": {"type": "string"}, "depth": {"type": "integer", "default": 2}, "repo_id": {"type": "string"}}),
-        ("list_entities", "List all entities of a type (Function, Class, Method, Module, File).",
-         {"entity_type": {"type": "string"}, "limit": {"type": "integer", "default": 50}, "repo_id": {"type": "string"}}),
-        ("list_entities_tree",
-         "List all entities of a type grouped into a folder/file tree. "
-         "Use this instead of list_entities for 'get all X' queries — returns a compact summary safe for large repos.",
-         {"entity_type": {"type": "string", "description": "Function, Class, File, Folder"},
-          "repo_id": {"type": "string"}}),
-        ("analyze_file", "Analyze a file using the graph database — extracts decorators, imports, classes, functions. "
-         "Reads node content from graph (no filesystem access needed). Use this for decorator/pattern analysis.",
-         {"file_path": {"type": "string", "description": "e.g., fastapi/routing.py"},
-          "focus": {"type": "string", "description": "What to analyze: decorators, imports, classes, functions, content"},
-          "repo_id": {"type": "string", "description": "Optional repo filter"}}),
+        (
+            "find_entity",
+            "Locate a class, function, or module by name using hybrid search.",
+            {
+                "name": {"type": "string", "description": "Entity name"},
+                "entity_type": {
+                    "type": "string",
+                    "description": "Optional: Class, Function, Method",
+                },
+                "repo_id": {"type": "string", "description": "Repo scope"},
+            },
+        ),
+        (
+            "get_dependencies",
+            "Find what an entity depends on (outgoing relationships).",
+            {
+                "entity_name": {"type": "string", "description": "Entity name"},
+                "repo_id": {"type": "string"},
+            },
+        ),
+        (
+            "get_dependents",
+            "Find what depends on an entity (incoming relationships).",
+            {
+                "entity_name": {"type": "string", "description": "Entity name"},
+                "repo_id": {"type": "string"},
+            },
+        ),
+        (
+            "trace_imports",
+            "Find what a module/file calls or imports. Accepts a symbol name (e.g. 'APIRouter') or file path fragment (e.g. 'routing' or 'fastapi/routing.py').",
+            {
+                "module_name": {
+                    "type": "string",
+                    "description": "Symbol name or file path fragment",
+                },
+                "repo_id": {"type": "string"},
+            },
+        ),
+        (
+            "find_related",
+            "Get entities related by a specific relationship type (CALLS, MEMBER_OF, STEP_IN_PROCESS, ACCESSES, DEFINES, HAS_METHOD).",
+            {
+                "entity_name": {"type": "string"},
+                "relationship_type": {"type": "string"},
+                "repo_id": {"type": "string"},
+            },
+        ),
+        (
+            "execute_query",
+            "Run a raw Cypher query against LadybugDB (read-only).",
+            {"cypher": {"type": "string", "description": "Cypher query string"}},
+        ),
+        (
+            "get_symbol_context",
+            "360-degree view of a symbol: callers, callees, imports, process participation. BEST tool for lifecycle/flow questions.",
+            {"symbol_name": {"type": "string"}, "repo_id": {"type": "string"}},
+        ),
+        (
+            "analyze_impact",
+            "Blast-radius: what breaks if this symbol changes.",
+            {
+                "symbol_name": {"type": "string"},
+                "depth": {"type": "integer", "default": 2},
+                "repo_id": {"type": "string"},
+            },
+        ),
+        (
+            "list_entities",
+            "List all entities of a type (Function, Class, Method, Module, File).",
+            {
+                "entity_type": {"type": "string"},
+                "limit": {"type": "integer", "default": 50},
+                "repo_id": {"type": "string"},
+            },
+        ),
+        (
+            "list_entities_tree",
+            "List all entities of a type grouped into a folder/file tree. "
+            "Use this instead of list_entities for 'get all X' queries — returns a compact summary safe for large repos.",
+            {
+                "entity_type": {
+                    "type": "string",
+                    "description": "Function, Class, File, Folder",
+                },
+                "repo_id": {"type": "string"},
+            },
+        ),
+        (
+            "analyze_file",
+            "Extract classes, functions, and decorators from a file via the graph. "
+            "Accepts full path ('fastapi/routing.py') OR partial name ('routing') — CONTAINS matching resolves the real path. "
+            "Always use this for 'find decorators/imports in <module>' queries.",
+            {
+                "file_path": {
+                    "type": "string",
+                    "description": "Full or partial path, e.g. 'routing' or 'fastapi/routing.py'",
+                },
+                "repo_id": {"type": "string", "description": "Optional repo filter"},
+            },
+        ),
     ]:
         tools.append(_make_mcp_tool("graph_query", gq_port, name, desc, schema))
 
     ca_port = settings.CODE_ANALYST_PORT
 
     for name, desc, schema in [
-        ("explain_implementation", "LLM-generated plain-English explanation of how an entity works.",
-         {"entity_name": {"type": "string"}, "model": {"type": "string"}}),
-        ("analyze_function", "Deep analysis of a function's logic.",
-         {"function_name": {"type": "string"}, "repo_path": {"type": "string"}, "model": {"type": "string"}}),
-        ("analyze_class", "Comprehensive analysis of a class and its methods.",
-         {"class_name": {"type": "string"}, "repo_path": {"type": "string"}, "model": {"type": "string"}}),
-        ("get_code_snippet", "Raw source code with surrounding context lines.",
-         {"entity_name": {"type": "string"}, "context_lines": {"type": "integer", "default": 5}, "repo_id": {"type": "string"}}),
-        ("find_patterns", "Detect design patterns in a module or entity.",
-         {"code_path": {"type": "string"}, "pattern_type": {"type": "string"}}),
-        ("compare_implementations", "LLM comparison of two code entities side-by-side.",
-         {"entity_a": {"type": "string"}, "entity_b": {"type": "string"}, "model": {"type": "string"}}),
+        (
+            "explain_implementation",
+            "LLM-generated plain-English explanation of how an entity works.",
+            {"entity_name": {"type": "string"}, "model": {"type": "string"}},
+        ),
+        (
+            "analyze_function",
+            "Deep analysis of a function's logic.",
+            {
+                "function_name": {"type": "string"},
+                "repo_path": {"type": "string"},
+                "model": {"type": "string"},
+            },
+        ),
+        (
+            "analyze_class",
+            "Comprehensive analysis of a class and its methods.",
+            {
+                "class_name": {"type": "string"},
+                "repo_path": {"type": "string"},
+                "model": {"type": "string"},
+            },
+        ),
+        (
+            "get_code_snippet",
+            "Raw source code with surrounding context lines.",
+            {
+                "entity_name": {"type": "string"},
+                "context_lines": {"type": "integer", "default": 5},
+                "repo_id": {"type": "string"},
+            },
+        ),
+        (
+            "find_patterns",
+            "Detect design patterns in a module or entity.",
+            {"code_path": {"type": "string"}, "pattern_type": {"type": "string"}},
+        ),
+        (
+            "compare_implementations",
+            "LLM comparison of two code entities side-by-side.",
+            {
+                "entity_a": {"type": "string"},
+                "entity_b": {"type": "string"},
+                "model": {"type": "string"},
+            },
+        ),
     ]:
         tools.append(_make_mcp_tool("code_analyst", ca_port, name, desc, schema))
 
@@ -261,38 +395,71 @@ def build_tools(repo_id: str = "", model: str = "") -> list:
 
 
 async def inject_history(state: OrchestratorState) -> dict:
-    """Prepend conversation history from memory agent to state messages."""
+    """Prepend conversation history from memory agent to state messages.
+
+    Also marks the original current-user message so persist_turn can distinguish
+    it from injected-history HumanMessages when extracting the current turn's user input.
+    """
     session_id = state.get("session_id", "")
     current = list(state.get("messages", []))
+    current_user_msg = ""
+
+    # Identify the current turn's HumanMessage before we prepend history.
+    # persist_turn will use _current_user_msg instead of searching reversed(messages),
+    # which avoids accidentally picking up an injected-history HumanMessage.
+    if current and isinstance(current[0], HumanMessage):
+        current_user_msg = current[0].content
+        # Tag the original so it's identifiable if needed
+        current[0].content = f"[CURRENT_TURN] {current[0].content}"
 
     if not session_id:
         return {"messages": current}
 
     history_result = await _call_mcp_agent(
-        "memory", settings.MEMORY_PORT,
-        "get_conversation_context", {"session_id": session_id},
+        "memory",
+        settings.MEMORY_PORT,
+        "get_conversation_context",
+        {"session_id": session_id},
         timeout=10,
     )
 
-    prior: list = history_result.get("messages", history_result.get("context", [])) or []
+    prior: list = (
+        history_result.get("messages", history_result.get("context", [])) or []
+    )
     history_messages = []
-    for turn in prior[-10:]:
+    # Cap AI response history to avoid overwhelming local models' context windows.
+    # Tool schemas from bind_tools already cost ~1500 tokens; long prior AI answers
+    # push the total past the effective generation budget and cause empty responses.
+    _MAX_TURNS = 6
+    _MAX_AI_CHARS = 600  # ~150 tokens — enough for context without crowding
+    for turn in prior[-_MAX_TURNS:]:
         role = turn.get("role", "")
         content = turn.get("content", "")
         if role == "user":
             history_messages.append(HumanMessage(content=content))
         elif role == "assistant":
+            if len(content) > _MAX_AI_CHARS:
+                content = content[:_MAX_AI_CHARS] + "\n... [truncated for context]"
             history_messages.append(AIMessage(content=content))
 
     if not history_messages:
-        return {"messages": current}
+        return {"messages": current, "_current_user_msg": current_user_msg}
 
-    return {"messages": history_messages + current}
+    logger.info(
+        "inject_history: injecting %d history messages for session %s",
+        len(history_messages),
+        session_id,
+    )
+    return {
+        "messages": history_messages + current,
+        "_current_user_msg": current_user_msg,
+    }
 
 
 async def react_agent(state: OrchestratorState) -> dict:
     """Single ReAct step: LLM decides next tool call or final answer."""
     import asyncio as _asyncio
+
     model = state.get("model", "")
     repo_id = state.get("repo_id", "")
 
@@ -312,17 +479,29 @@ async def react_agent(state: OrchestratorState) -> dict:
     logger.info("react_agent: %d messages to LLM", len(messages))
     for i, m in enumerate(messages):
         m_type = type(m).__name__
-        content_len = len(str(getattr(m, 'content', '')))
+        content_len = len(str(getattr(m, "content", "")))
         if i == 0:  # System prompt
             logger.info("  [sys] SystemMessage: %d chars", content_len)
         elif m_type == "HumanMessage":
             logger.info("  [%d] %s: %s...", i, m_type, str(m.content)[:100])
         elif m_type == "AIMessage":
-            tool_calls = len(getattr(m, 'tool_calls', []))
-            logger.info("  [%d] %s: %d tool_calls, content=%d chars", i, m_type, tool_calls, content_len)
+            tool_calls = len(getattr(m, "tool_calls", []))
+            logger.info(
+                "  [%d] %s: %d tool_calls, content=%d chars",
+                i,
+                m_type,
+                tool_calls,
+                content_len,
+            )
         elif m_type == "ToolMessage":
-            tool_name = getattr(m, 'name', '?')
-            logger.info("  [%d] ToolMessage (%s): %d chars, preview: %s", i, tool_name, content_len, str(m.content)[:300])
+            tool_name = getattr(m, "name", "?")
+            logger.info(
+                "  [%d] ToolMessage (%s): %d chars, preview: %s",
+                i,
+                tool_name,
+                content_len,
+                str(m.content)[:300],
+            )
         else:
             logger.info("  [%d] %s: %d chars", i, m_type, content_len)
 
@@ -333,34 +512,70 @@ async def react_agent(state: OrchestratorState) -> dict:
     for attempt in range(4):
         try:
             response = await llm.ainvoke(messages)
-            logger.info("react_agent LLM response: type=%s, content_len=%d, tool_calls=%s",
-                       type(response).__name__,
-                       len(str(getattr(response, 'content', ''))),
-                       len(getattr(response, 'tool_calls', [])) if hasattr(response, 'tool_calls') else 'N/A')
-            logger.info("  content preview: %s", str(getattr(response, 'content', ''))[:200])
+            logger.info(
+                "react_agent LLM response: type=%s, content_len=%d, tool_calls=%s",
+                type(response).__name__,
+                len(str(getattr(response, "content", ""))),
+                len(getattr(response, "tool_calls", []))
+                if hasattr(response, "tool_calls")
+                else "N/A",
+            )
+            logger.info(
+                "  content preview: %s", str(getattr(response, "content", ""))[:200]
+            )
             break
         except Exception as exc:
             err = str(exc)
-            is_timeout = "524" in err or "timeout" in err.lower() or "timed out" in err.lower()
-            is_rate_limit = "429" in err or "rate limit" in err.lower() or "too many requests" in err.lower()
+            is_timeout = (
+                "524" in err or "timeout" in err.lower() or "timed out" in err.lower()
+            )
+            is_rate_limit = (
+                "429" in err
+                or "rate limit" in err.lower()
+                or "too many requests" in err.lower()
+            )
             if is_rate_limit:
                 last_exc = exc
-                wait = 10 * (2 ** attempt)  # 10s, 20s, 40s, 80s
-                logger.warning("LLM rate-limited (429), retrying in %ds [attempt %d/4]: %s", wait, attempt + 1, err[:120])
+                wait = 10 * (2**attempt)  # 10s, 20s, 40s, 80s
+                logger.warning(
+                    "LLM rate-limited (429), retrying in %ds [attempt %d/4]: %s",
+                    wait,
+                    attempt + 1,
+                    err[:120],
+                )
                 try:
                     writer = get_stream_writer()
-                    writer({"type": "retry", "reason": "rate_limit", "wait": wait, "attempt": attempt + 1})
+                    writer(
+                        {
+                            "type": "retry",
+                            "reason": "rate_limit",
+                            "wait": wait,
+                            "attempt": attempt + 1,
+                        }
+                    )
                 except Exception:
                     pass
                 await _asyncio.sleep(wait)
                 continue
             elif is_timeout:
                 last_exc = exc
-                wait = 2 ** attempt  # 1s, 2s, 4s, 8s
-                logger.warning("LLM timeout, retrying in %ds [attempt %d/4]: %s", wait, attempt + 1, err[:120])
+                wait = 2**attempt  # 1s, 2s, 4s, 8s
+                logger.warning(
+                    "LLM timeout, retrying in %ds [attempt %d/4]: %s",
+                    wait,
+                    attempt + 1,
+                    err[:120],
+                )
                 try:
                     writer = get_stream_writer()
-                    writer({"type": "retry", "reason": "timeout", "wait": wait, "attempt": attempt + 1})
+                    writer(
+                        {
+                            "type": "retry",
+                            "reason": "timeout",
+                            "wait": wait,
+                            "attempt": attempt + 1,
+                        }
+                    )
                 except Exception:
                     pass
                 await _asyncio.sleep(wait)
@@ -388,7 +603,12 @@ async def persist_turn(state: OrchestratorState) -> dict:
         # Log tool calls if present
         if msg_type == "AIMessage" and has_tool_calls:
             tool_calls = getattr(m, "tool_calls", [])
-            logger.info("  [%d] AIMessage: %d tool_calls, content=%s", i, len(tool_calls), content_preview)
+            logger.info(
+                "  [%d] AIMessage: %d tool_calls, content=%s",
+                i,
+                len(tool_calls),
+                content_preview,
+            )
             for j, tc in enumerate(tool_calls):
                 tool_name = tc.get("name", "?")
                 tool_args = str(tc.get("args", "?"))[:100]
@@ -396,7 +616,12 @@ async def persist_turn(state: OrchestratorState) -> dict:
         elif msg_type == "ToolMessage":
             logger.info("  [%d] ToolMessage: %s", i, content_preview)
         elif msg_type == "AIMessage":
-            logger.info("  [%d] AIMessage (final): content_len=%d, preview=%s", i, len(str(content)), content_preview)
+            logger.info(
+                "  [%d] AIMessage (final): content_len=%d, preview=%s",
+                i,
+                len(str(content)),
+                content_preview,
+            )
             logger.info("       Full content: %s", repr(content)[:500])
         else:
             logger.info("  [%d] %s: %s", i, msg_type, content_preview)
@@ -405,14 +630,33 @@ async def persist_turn(state: OrchestratorState) -> dict:
         logger.info("persist_turn: no session_id, returning empty")
         return {}
 
-    user_msg = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
-    ai_msg = next((m.content for m in reversed(messages) if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None)), "")
+    # _current_user_msg is captured by inject_history before history is prepended.
+    # reversed(messages) would incorrectly grab an injected-history HumanMessage
+    # (from turn N-1) since inject_history puts history BEFORE the current
+    # HumanMessage in the list.
+    current_input = state.get("_current_user_msg", "")
+    if not current_input:
+        for m in reversed(messages):
+            content = str(getattr(m, "content", "") or "")
+            if isinstance(m, HumanMessage) and not content.startswith("[CURRENT_TURN]"):
+                current_input = content
+                break
+    user_msg = current_input
+    ai_msg = next(
+        (
+            m.content
+            for m in reversed(messages)
+            if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None)
+        ),
+        "",
+    )
 
     logger.info("persist_turn RESULT: user_msg=%.50s ai_msg=%.50s", user_msg, ai_msg)
 
     if user_msg and ai_msg:
         await _call_mcp_agent(
-            "memory", settings.MEMORY_PORT,
+            "memory",
+            settings.MEMORY_PORT,
             "store_interaction",
             {"session_id": session_id, "query": user_msg, "response": ai_msg},
             timeout=10,

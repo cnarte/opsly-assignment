@@ -320,65 +320,96 @@ async def list_entities_tree(entity_type: str, repo_id: str = "") -> dict:
 
 
 # ---------------------------------------------------------------------------
-# File-level analysis tool (bypasses symbol search limitations)
+# File-level analysis tool (graph-only via gitnexus)
 # ---------------------------------------------------------------------------
 
 
 @mcp.tool()
-async def analyze_file(file_path: str, focus: str = "") -> dict:
-    """Analyze a file directly for decorators, imports, classes, functions.
+async def analyze_file(file_path: str, repo_id: str = "") -> dict:
+    """Extract classes, functions, decorators, and imports from a file via the graph.
 
-    Bypasses symbol-search limitations by reading raw file content.
+    Accepts full path ("fastapi/routing.py") or partial name ("routing") —
+    uses CONTAINS matching so either form works.
+
     Args:
-        file_path: e.g., "fastapi/routing.py"
-        focus: What to analyze (e.g., "decorators", "imports", "classes")
+        file_path: Full or partial file path, e.g. "routing" or "fastapi/routing.py"
+        repo_id:   Optional repo scope.
 
-    Returns: Analysis with file content, extracted entities, and patterns
+    Returns: dict with classes, functions, decorators lists and total entity count.
     """
-    import os
+    safe = file_path.replace('"', "").replace("'", "").replace(";", "")
 
-    workspace = os.getenv("WORKSPACE_PATH", "/workspace/repos")
-    analysis = {
-        "file_path": file_path,
-        "focus": focus,
-        "found": False,
-        "content": "",
-        "decorators": [],
-        "classes": [],
-        "functions": [],
-        "imports": [],
+    # ── 1. Resolve the actual filePath stored in the graph ────────────────────
+    # Use CONTAINS so "routing" matches "fastapi/routing.py"
+    resolve_cypher = (
+        f'MATCH (n) WHERE n.filePath CONTAINS "{safe}" AND n.filePath IS NOT NULL '
+        f"RETURN DISTINCT n.filePath AS fp LIMIT 10"
+    )
+    resolve_result = await _call_gitnexus(
+        "cypher", _repo_args({"query_str": resolve_cypher}, repo_id)
+    )
+    resolved_paths: list[str] = []
+    for row in _parse_result(resolve_result):
+        fp = row.get("fp", "")
+        if fp:
+            resolved_paths.append(fp)
+
+    # Fall back to the original value if no graph match
+    target_path = resolved_paths[0] if resolved_paths else safe
+
+    # ── 2. Fetch all nodes in that file (name + id, compact) ─────────────────
+    struct_cypher = (
+        f'MATCH (n) WHERE n.filePath = "{target_path}" AND n.name IS NOT NULL '
+        f"RETURN n.id AS id, n.name AS name LIMIT 200"
+    )
+    struct_result = await _call_gitnexus(
+        "cypher", _repo_args({"query_str": struct_cypher}, repo_id)
+    )
+    nodes = _parse_result(struct_result)
+
+    classes: list[str] = []
+    functions: list[str] = []
+    other: list[str] = []
+    for node in nodes:
+        nid: str = node.get("id", "")
+        name: str = node.get("name", "")
+        if not name:
+            continue
+        if nid.startswith("Class:"):
+            classes.append(name)
+        elif nid.startswith("Function:") or nid.startswith("Method:"):
+            functions.append(name)
+        else:
+            other.append(name)
+
+    # ── 3. Extract decorators from raw content via Cypher ────────────────────
+    # Node `content` fields hold source text — extract @decorator tokens.
+    content_cypher = (
+        f'MATCH (n) WHERE n.filePath = "{target_path}" AND n.content IS NOT NULL '
+        f"RETURN n.content AS content LIMIT 100"
+    )
+    content_result = await _call_gitnexus(
+        "cypher", _repo_args({"query_str": content_cypher}, repo_id)
+    )
+    # content_result is raw markdown — grep @tokens directly from the blob
+    raw_blob = (
+        content_result.get("markdown", "")
+        or content_result.get("result", "")
+        or json.dumps(content_result)
+    )
+    decorators: list[str] = sorted(set(re.findall(r"@[\w\.]+", raw_blob)))
+
+    found = bool(nodes or decorators)
+    return {
+        "file_path": target_path,
+        "found": found,
+        "resolved_paths": resolved_paths,
+        "classes": classes,
+        "functions": functions,
+        "decorators": decorators,
+        "other_nodes": other,
+        "total_nodes": len(nodes),
     }
-
-    # Try to find the file in indexed repos
-    if os.path.exists(workspace):
-        for repo_dir in os.listdir(workspace):
-            candidate = os.path.join(workspace, repo_dir, file_path)
-            if os.path.exists(candidate):
-                try:
-                    with open(candidate, "r") as f:
-                        content = f.read()
-                    analysis["found"] = True
-                    analysis["repo"] = repo_dir
-                    analysis["size_bytes"] = len(content)
-
-                    # Extract patterns — don't return raw content (too large, gets truncated)
-                    import re
-                    analysis["decorators"] = sorted(set(re.findall(r"@[\w\.]+", content)))
-                    analysis["classes"] = re.findall(r"^class\s+(\w+)", content, re.MULTILINE)
-                    analysis["functions"] = re.findall(r"^(?:async\s+)?def\s+(\w+)", content, re.MULTILINE)
-                    analysis["imports"] = re.findall(r"^(?:from|import)\s+(.+)$", content, re.MULTILINE)
-
-                    # Include content only when explicitly requested and file is small
-                    if focus == "content" or (focus == "" and len(content) < 8000):
-                        analysis["content"] = content
-
-                    return analysis
-                except Exception as e:
-                    analysis["error"] = str(e)
-                    return analysis
-
-    analysis["error"] = f"File not found in {workspace}"
-    return analysis
 
 
 # ---------------------------------------------------------------------------
