@@ -23,6 +23,7 @@ class ChatResponse(BaseModel):
     agents_used: list[str] = Field(default_factory=list)
     agent_results: dict = Field(default_factory=dict)
     tool_plan: list = Field(default_factory=list)
+    tool_calls: list = Field(default_factory=list)
 
 
 class IndexRequest(BaseModel):

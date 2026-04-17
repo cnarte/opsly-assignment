@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -43,21 +44,63 @@ settings = Settings()
 
 
 def get_langfuse_callback(session_id: str = "", user_id: str = ""):
-    """Return a Langfuse LangChain callback handler, or None if not configured.
+    """Return a configured Langfuse client, or None if keys are not set.
 
-    Note: Langfuse 3.x changed the callback API. This is currently disabled
-    until we integrate with the new LangChain callback interface or use
-    Langfuse's @observe decorator pattern instead.
+    Uses Langfuse v3 direct SDK so it works with graph.astream_events().
+    LangChain CallbackHandler conflicts with astream_events streaming in LangGraph.
+    Reads from Settings (not os.environ) so .env file loading works correctly.
     """
     if not settings.LANGFUSE_PUBLIC_KEY or not settings.LANGFUSE_SECRET_KEY:
         return None
-    # TODO: Integrate with langfuse 3.x callback handler for LangChain
-    # The old CallbackHandler from langfuse.callback is no longer available.
-    # Options: Use Langfuse.get_client() with @observe or integrate with LangChain callbacks differently.
-    logger.debug(
-        "Langfuse callback not yet integrated with langfuse 3.x — tracing disabled"
-    )
-    return None
+
+    try:
+        from langfuse import Langfuse
+
+        base_url = settings.LANGFUSE_HOST or settings.LANGFUSE_BASE_URL or None
+        client = Langfuse(
+            public_key=settings.LANGFUSE_PUBLIC_KEY,
+            secret_key=settings.LANGFUSE_SECRET_KEY,
+            host=base_url,
+        )
+        client.auth_check()
+        logger.info("Langfuse tracing enabled (session=%s)", session_id or "default")
+        return client
+    except Exception as exc:
+        logger.warning("Langfuse client init failed: %s — tracing disabled", exc)
+        return None
+
+
+class _NoOpContext:
+    """No-op context manager used when Langfuse is disabled."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+
+def _observe(session_id: str, name: str, input_data: dict, user_id: str = ""):
+    """Return a Langfuse observe context manager, or a no-op if not configured."""
+    client = get_langfuse_callback(session_id=session_id)
+    if client is None:
+        return _NoOpContext()
+
+    metadata = {}
+    if session_id:
+        metadata["session_id"] = session_id
+    if user_id:
+        metadata["user_id"] = user_id
+
+    try:
+        return client.start_as_current_observation(
+            name=name,
+            input=input_data,
+            metadata=metadata or None,
+        )
+    except Exception as exc:
+        logger.warning("Langfuse observe failed: %s — continuing without tracing", exc)
+        return _NoOpContext()
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +196,8 @@ async def _call_mcp_agent(
     from mcp.client.streamable_http import streamable_http_client
     from mcp import ClientSession
 
+    start_time = time.time()
+
     _PORT_TO_SERVICE: dict[int, str] = {
         settings.ORCHESTRATOR_PORT: "orchestrator",
         settings.INDEXER_PORT: "indexer",
@@ -189,15 +234,25 @@ async def _call_mcp_agent(
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     result = await session.call_tool(tool_name, tool_args)
+                    duration_ms = int((time.time() - start_time) * 1000)
                     if result.content:
                         try:
-                            return json.loads(result.content[0].text)
+                            return {
+                                "_duration_ms": duration_ms,
+                                **json.loads(result.content[0].text),
+                            }
                         except (json.JSONDecodeError, TypeError):
-                            return {"result": result.content[0].text}
-                    return {}
+                            return {
+                                "_duration_ms": duration_ms,
+                                "result": result.content[0].text,
+                            }
+                    return {"_duration_ms": duration_ms}
     except Exception as exc:
         logger.warning("MCP call %s/%s failed: %s", agent_name, tool_name, exc)
-        return {"error": f"{agent_name}/{tool_name} failed: {exc}"}
+        return {
+            "error": f"{agent_name}/{tool_name} failed: {exc}",
+            "_duration_ms": int((time.time() - start_time) * 1000),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -387,27 +442,9 @@ def build_tools(repo_id: str = "", model: str = "") -> list:
             },
         ),
         (
-            "get_code_snippet",
-            "Raw source code with surrounding context lines.",
-            {
-                "entity_name": {"type": "string"},
-                "context_lines": {"type": "integer", "default": 5},
-                "repo_id": {"type": "string"},
-            },
-        ),
-        (
             "find_patterns",
             "Detect design patterns in a module or entity.",
             {"code_path": {"type": "string"}, "pattern_type": {"type": "string"}},
-        ),
-        (
-            "compare_implementations",
-            "LLM comparison of two code entities side-by-side.",
-            {
-                "entity_a": {"type": "string"},
-                "entity_b": {"type": "string"},
-                "model": {"type": "string"},
-            },
         ),
     ]:
         tools.append(_make_mcp_tool("code_analyst", ca_port, name, desc, schema))
@@ -626,16 +663,20 @@ async def persist_turn(state: OrchestratorState) -> dict:
     session_id = state.get("session_id", "")
     messages = state.get("messages", [])
 
+    # Collect tool call timing data
+    tool_calls_data: list[dict] = []
+    tool_start_times: dict[str, float] = {}
+    tool_args_map: dict[str, dict] = {}
+
     logger.info("persist_turn: %d messages in state", len(messages))
     for i, m in enumerate(messages):
         msg_type = type(m).__name__
         has_tool_calls = getattr(m, "tool_calls", None) is not None
 
-        # Get content preview
         content = getattr(m, "content", "N/A")
+        content_len = len(str(content))
         content_preview = str(content)[:300]
 
-        # Log tool calls if present
         if msg_type == "AIMessage" and has_tool_calls:
             tool_calls = getattr(m, "tool_calls", [])
             logger.info(
@@ -646,10 +687,50 @@ async def persist_turn(state: OrchestratorState) -> dict:
             )
             for j, tc in enumerate(tool_calls):
                 tool_name = tc.get("name", "?")
-                tool_args = str(tc.get("args", "?"))[:100]
-                logger.info("       tool[%d]: %s(%s)", j, tool_name, tool_args)
+                tool_id = tc.get("id", f"call_{j}")
+                tool_args = tc.get("args", {})
+                tool_start_times[tool_id] = time.time()
+                tool_args_map[tool_id] = tool_args
+                logger.info(
+                    "       tool[%d]: id=%s name=%s args=%s",
+                    j,
+                    tool_id,
+                    tool_name,
+                    str(tool_args)[:100],
+                )
         elif msg_type == "ToolMessage":
-            logger.info("  [%d] ToolMessage: %s", i, content_preview)
+            tool_name = getattr(m, "name", "?")
+            tool_id = getattr(m, "tool_call_id", "")
+            content_str = str(content) if content else ""
+            duration_ms = 0
+            result_for_ui = content_str
+            try:
+                if content_str.startswith("{"):
+                    result_data = json.loads(content_str)
+                    duration_ms = result_data.get("_duration_ms", 0)
+                    clean_result = {
+                        k: v for k, v in result_data.items() if k != "_duration_ms"
+                    }
+                    result_for_ui = json.dumps(clean_result)[:300]
+            except Exception:
+                result_for_ui = content_str[:300]
+            logger.info(
+                "  [%d] ToolMessage (%s): %d chars, duration_ms=%d, preview: %s",
+                i,
+                tool_name,
+                content_len,
+                duration_ms,
+                content_preview,
+            )
+            tool_calls_data.append(
+                {
+                    "tool": tool_name,
+                    "args": tool_args_map.get(tool_id, {}),
+                    "result": result_for_ui,
+                    "duration_ms": duration_ms,
+                    "ts": time.strftime("%H:%M:%S"),
+                }
+            )
         elif msg_type == "AIMessage":
             logger.info(
                 "  [%d] AIMessage (final): content_len=%d, preview=%s",
@@ -662,13 +743,8 @@ async def persist_turn(state: OrchestratorState) -> dict:
             logger.info("  [%d] %s: %s", i, msg_type, content_preview)
 
     if not session_id:
-        logger.info("persist_turn: no session_id, returning empty")
-        return {}
+        return {"final_response": "", "tool_calls": tool_calls_data}
 
-    # _current_user_msg is captured by inject_history before history is prepended.
-    # reversed(messages) would incorrectly grab an injected-history HumanMessage
-    # (from turn N-1) since inject_history puts history BEFORE the current
-    # HumanMessage in the list.
     current_input = state.get("_current_user_msg", "")
     if not current_input:
         for m in reversed(messages):
@@ -693,4 +769,4 @@ async def persist_turn(state: OrchestratorState) -> dict:
             {"session_id": session_id, "query": user_msg, "response": ai_msg},
             timeout=10,
         )
-    return {"final_response": ai_msg}
+    return {"final_response": ai_msg, "tool_calls": tool_calls_data}

@@ -1,4 +1,5 @@
 """System prompt for the ReAct orchestrator agent."""
+
 from __future__ import annotations
 
 REACT_SYSTEM_PROMPT = """\
@@ -16,10 +17,9 @@ You are a code analysis assistant for software repositories indexed with GitNexu
 | `trace_imports` | Follow what a symbol or file calls/imports externally |
 | `analyze_impact` | Blast-radius: what breaks if this symbol changes (risk + byDepth) |
 | `analyze_file` | Extract classes, functions, decorators from a file via graph — accepts full path OR partial name (e.g. "routing") |
-| `execute_query` | Raw Cypher against LadybugDB |
+| `execute_query` | Raw Cypher against LadybugDB - USE THIS to get code content! |
 | `list_entities_tree` | All entities of a type grouped by folder/file (compact, safe for large repos) |
 | `list_entities` | All entities of a type as a flat list (use only for small result sets) |
-| `get_code_snippet` | Retrieve source code for a symbol |
 | `explain_implementation` | Deep explanation of how a symbol is implemented |
 | `analyze_function` / `analyze_class` | Structural analysis of a function or class |
 
@@ -49,8 +49,27 @@ You are a code analysis assistant for software repositories indexed with GitNexu
 **Workflow:**
 1. `find_entity(name="<concept>")` → find related execution flows and definitions
 2. `get_symbol_context(symbol_name="<key symbol>")` → 360-degree view (callers, callees, processes)
-3. `get_code_snippet` or `explain_implementation` → read implementation details
-4. `analyze_file(file_path="<path>")` → if you need to see decorators/imports in a file
+3. `analyze_file(file_path="<path>")` → get file content, classes, functions, decorators
+4. `execute_query(cypher="MATCH (n:Function {name: 'foo'}) RETURN n.content")` → get raw code content
+
+**Code Content Examples:**
+
+To get source code of a specific function/class:
+```
+execute_query(cypher="MATCH (n:Function {name: 'websocket'}) RETURN n.name, n.filePath, n.content LIMIT 1")
+```
+
+To get code with line numbers:
+```
+execute_query(cypher="MATCH (n) WHERE n.name = 'websocket' RETURN n.name, n.filePath, n.startLine, n.endLine")
+```
+
+To get full file content:
+```
+analyze_file(file_path="fastapi/routing.py")
+```
+
+⚠️ `get_code_snippet` is DISABLED — it requires a local workspace that doesn't exist. Always use `execute_query` or `analyze_file` instead.
 
 **Checklist:**
 - Start with `find_entity` to find the right symbol name

@@ -644,6 +644,7 @@ with chat_col:
         activity["status"] = "done"
         activity["agents"] = agents_used
         activity["classification"] = result.get("query_classification", {})
+        activity["tool_calls"] = result.get("tool_calls", [])
 
         st.session_state.messages.append(
             {
@@ -727,8 +728,13 @@ with panel_col:
                         for j, tc in enumerate(tool_calls):
                             tool_icon = "🔧"
                             result_icon = "✅" if tc.get("result") is not None else "⏳"
+                            duration_ms = tc.get("duration_ms", 0)
+                            duration_str = f"{duration_ms}ms" if duration_ms else ""
+                            label = f"{result_icon} {tool_icon} `{tc['tool']}` — {tc.get('ts', '')}"
+                            if duration_str:
+                                label += f" ({duration_str})"
                             with st.expander(
-                                f"{result_icon} {tool_icon} `{tc['tool']}` — {tc.get('ts', '')}",
+                                label,
                                 expanded=False,
                             ):
                                 if tc.get("args"):

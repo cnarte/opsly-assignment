@@ -42,13 +42,14 @@ async def chat(request: ChatRequest):
         async def _proxy_sse():
             async with httpx.AsyncClient(timeout=300) as client:
                 async with client.stream(
-                    "POST", stream_url,
+                    "POST",
+                    stream_url,
                     json={
                         "message": request.message,
                         "session_id": session_id,
                         "repo_id": repo_id,
                         "model": model,
-                    }
+                    },
                 ) as resp:
                     async for line in resp.aiter_lines():
                         if line:
@@ -58,7 +59,12 @@ async def chat(request: ChatRequest):
 
     result = await call_orchestrator_tool(
         "route_to_agents",
-        {"message": request.message, "session_id": session_id, "repo_id": repo_id, "model": model},
+        {
+            "message": request.message,
+            "session_id": session_id,
+            "repo_id": repo_id,
+            "model": model,
+        },
         timeout=300,
     )
 
@@ -73,6 +79,7 @@ async def chat(request: ChatRequest):
     final_response = result.get("final_response", str(result))
     agent_results = result.get("agent_results", {})
     tool_plan = result.get("tool_plan", [])
+    tool_calls = result.get("tool_calls", [])
 
     return ChatResponse(
         response=final_response,
@@ -80,6 +87,7 @@ async def chat(request: ChatRequest):
         agents_used=agents_used,
         agent_results=agent_results,
         tool_plan=tool_plan,
+        tool_calls=tool_calls,
     )
 
 
@@ -87,6 +95,7 @@ async def chat(request: ChatRequest):
 async def get_history(session_id: str):
     """Return stored conversation history for a session from the memory agent."""
     from src.gateway.mcp_client import call_agent_tool
+
     result = await call_agent_tool(
         settings.MEMORY_PORT,
         "get_conversation_context",
@@ -119,13 +128,16 @@ async def ws_chat(websocket: WebSocket) -> None:
                 model = ""
 
             # Send acknowledgement
-            await websocket.send_json(
-                {"type": "ack", "session_id": session_id}
-            )
+            await websocket.send_json({"type": "ack", "session_id": session_id})
 
             result = await call_orchestrator_tool(
                 "route_to_agents",
-                {"message": message, "session_id": session_id, "repo_id": repo_id, "model": model},
+                {
+                    "message": message,
+                    "session_id": session_id,
+                    "repo_id": repo_id,
+                    "model": model,
+                },
             )
 
             agents_used = result.get("agent_plan", [])

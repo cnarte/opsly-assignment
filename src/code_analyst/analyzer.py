@@ -34,6 +34,15 @@ async def _locate_symbol(symbol_name: str, repo_id: str = "") -> dict:
                 result = await session.call_tool("context", args)
                 if result.content:
                     data = _json.loads(result.content[0].text)
+                    # Handle ambiguous results - pick first candidate
+                    if data.get("status") == "ambiguous" and data.get("candidates"):
+                        first = data["candidates"][0]
+                        return {
+                            "file_path": first.get("filePath", ""),
+                            "start_line": first.get("line", first.get("startLine", 0)),
+                            "repo": data.get("repo", ""),
+                            "candidates": data.get("candidates", []),
+                        }
                     return {
                         "file_path": data.get("file_path") or data.get("file") or "",
                         "start_line": data.get("start_line") or data.get("line") or 0,
