@@ -1,4 +1,4 @@
-# FastAPI Repository Chat Agent — MCP Multi-Agent System
+# Code Intelligence Agent — Multi-Agent Knowledge Graph for Codebases
 
 A production-ready multi-agent system that answers questions about the FastAPI codebase using real data from a knowledge graph. Built on the Model Context Protocol (MCP) with five specialised agents coordinated by a LangGraph orchestrator and exposed via a FastAPI gateway.
 
@@ -85,7 +85,7 @@ For a visual representation of the knowledge graph schema, see [`code graph visu
 
 ```bash
 # 1. Clone and enter directory
-git clone <repo-url> && cd opsly-assignment
+git clone <repo-url> && cd code-intelligence-agent
 
 # 2. Copy env file and set your API key
 cp .env.example .env
